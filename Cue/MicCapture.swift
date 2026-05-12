@@ -1,3 +1,4 @@
+#if os(iOS)
 import Foundation
 import AVFoundation
 import AVFAudio
@@ -62,11 +63,17 @@ final class MicCapture {
     private var engine = AVAudioEngine()
     private let handlerStore = BufferHandlerStore()
     private var interruptionObserver: Any?
+    private var routeChangeObserver: Any?
     private var startCount: Int = 0   // simple ref count so multiple callers can request capture
+    /// Reflects whether hardware voice processing (AEC/NS/AGC) is active
+    /// on the input node. We only turn it on when audio is routed to the
+    /// built-in speaker (the only route with an acoustic echo path).
+    private var voiceProcessingActive: Bool = false
 
     private init() {
         permission = currentPermission()
         installInterruptionObserver()
+        installRouteChangeObserver()
     }
 
     // MARK: - Permission
@@ -119,19 +126,97 @@ final class MicCapture {
             startCount = max(1, startCount)
             return
         }
+        bringUpEngine()
+        if !isCapturing { startCount = 0 }
+    }
 
-        // Rebuild the engine each start so it reflects the current
-        // AVAudioSession state. See comment on the `engine` property.
-        engine = AVAudioEngine()
+    /// Stop the input tap. Idempotent; honours the start ref-count.
+    func stop(force: Bool = false) {
+        if force { startCount = 0 } else { startCount = max(0, startCount - 1) }
+        guard startCount == 0 else { return }
+        guard isCapturing else { return }
+        tearDownEngine()
+        // Restore the session mode AudioPlayer expects for normal podcast
+        // playback (`.spokenAudio`) when we're no longer holding it in
+        // `.voiceChat` for VPIO.
+        try? AVAudioSession.sharedInstance().setMode(.spokenAudio)
+        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
+        print("[MicCapture] stopped")
+    }
 
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        // Sample rate of 0 means no hardware available (eg simulator without mic permission).
-        guard format.sampleRate > 0 else {
-            print("[MicCapture] input bus has no usable format; not starting")
-            startCount = 0
-            return
+    // MARK: - Engine bring-up / tear-down
+
+    /// Build a fresh engine, configure voice processing for the current
+    /// route, install the tap, and start the engine. Sets `isCapturing`
+    /// on success.
+    ///
+    /// Production wake-word AEC path: when the output route is the
+    /// built-in speaker (the only route with an acoustic echo loop),
+    /// switch the session to `.voiceChat` mode and enable VPIO on the
+    /// input node. This is the iOS-canonical AEC config. We accept the
+    /// known volume-headroom side effect — that's the tradeoff for
+    /// having the mic not hear the podcast.
+    private func bringUpEngine() {
+        let wantVP = shouldUseVoiceProcessing()
+
+        // Session: switch to `.voiceChat` when we want AEC; force speaker
+        // explicitly because `.voiceChat` ignores `.defaultToSpeaker` and
+        // would route to the earpiece otherwise.
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: wantVP ? .voiceChat : .spokenAudio,
+                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
+            )
+            if wantVP {
+                try session.overrideOutputAudioPort(.speaker)
+            } else {
+                try session.overrideOutputAudioPort(.none)
+            }
+        } catch {
+            print("[MicCapture] session config failed: \(error)")
         }
+
+        engine = AVAudioEngine()
+        let input = engine.inputNode
+
+        if wantVP {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                voiceProcessingActive = true
+                print("[MicCapture] VPIO + .voiceChat enabled — output route is built-in speaker")
+            } catch {
+                print("[MicCapture] setVoiceProcessingEnabled failed: \(error)")
+                voiceProcessingActive = false
+            }
+        } else {
+            voiceProcessingActive = false
+            print("[MicCapture] VPIO skipped — output route is \(routeDescription())")
+        }
+
+        // When VPIO is active, format negotiation across the I/O AU is
+        // strict — match Apple's WWDC 2019 sample by using one canonical
+        // 48 kHz mono Float32 format. Also explicitly wire the output side
+        // so the VPIO unit has both halves of its I/O configured.
+        let format: AVAudioFormat
+        if wantVP, let canonical = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ) {
+            format = canonical
+            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: format)
+        } else {
+            let queried = input.outputFormat(forBus: 0)
+            guard queried.sampleRate > 0 else {
+                print("[MicCapture] input bus has no usable format; not starting")
+                return
+            }
+            format = queried
+        }
+
         currentFormat = format
         let store = handlerStore  // capture the Sendable store, not self
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, when in
@@ -147,28 +232,60 @@ final class MicCapture {
             engine.prepare()
             try engine.start()
             isCapturing = true
-            print("[MicCapture] started — \(Int(format.sampleRate))Hz, \(format.channelCount)ch, \(format.commonFormat)")
+            print("[MicCapture] started — \(Int(format.sampleRate))Hz, \(format.channelCount)ch, vp=\(voiceProcessingActive)")
         } catch {
             print("[MicCapture] engine.start() failed: \(error)")
             input.removeTap(onBus: 0)
             currentFormat = nil
-            startCount = 0
         }
     }
 
-    /// Stop the input tap. Idempotent; honours the start ref-count.
-    func stop(force: Bool = false) {
-        if force { startCount = 0 } else { startCount = max(0, startCount - 1) }
-        guard startCount == 0 else { return }
-        guard isCapturing else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        isCapturing = false
+    private func tearDownEngine() {
+        if isCapturing {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            isCapturing = false
+        }
         currentFormat = nil
-        print("[MicCapture] stopped")
+        voiceProcessingActive = false
+    }
+
+    private func shouldUseVoiceProcessing() -> Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+    }
+
+    private func routeDescription() -> String {
+        AVAudioSession.sharedInstance().currentRoute.outputs
+            .map { $0.portType.rawValue }
+            .joined(separator: ",")
     }
 
     // MARK: - Interruptions
+
+    /// Watch for route changes (headphones plugged/unplugged, Bluetooth
+    /// connect, AirPlay handoff). If the desired voice-processing state
+    /// no longer matches what's live on the engine, rebuild it.
+    private func installRouteChangeObserver() {
+        let nc = NotificationCenter.default
+        routeChangeObserver = nc.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reconcileForRouteChange()
+            }
+        }
+    }
+
+    private func reconcileForRouteChange() {
+        guard isCapturing else { return }
+        let desired = shouldUseVoiceProcessing()
+        guard desired != voiceProcessingActive else { return }
+        print("[MicCapture] route changed; rebuilding engine (vp: \(voiceProcessingActive) -> \(desired))")
+        tearDownEngine()
+        bringUpEngine()
+    }
 
     private func installInterruptionObserver() {
         let nc = NotificationCenter.default
@@ -255,3 +372,4 @@ private final class BufferHandlerStore: @unchecked Sendable {
         return result
     }
 }
+#endif
