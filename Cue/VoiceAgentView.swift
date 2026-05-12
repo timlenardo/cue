@@ -133,15 +133,14 @@ private struct VoiceAgentLiveBody: View {
             }
             Spacer()
             Button { state.resumeAfterVoice() } label: {
-                    Text("Resume podcast")
-                        .font(Fonts.sans(13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(Capsule().fill(palette.accent))
-                }
-                .buttonStyle(.plain)
+                Text("Resume podcast")
+                    .font(Fonts.sans(13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(palette.accent))
             }
+            .buttonStyle(.plain)
         }
         .padding(.top, 4)
     }
