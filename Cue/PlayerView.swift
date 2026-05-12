@@ -31,35 +31,38 @@ struct PlayerView: View {
         ZStack(alignment: .bottom) {
             Ambient.bg.ignoresSafeArea()
 
+            // Transcript fills the screen between header and bottom controls.
+            // No extra top padding: iOS safe area already reserves the status
+            // bar; PlayerHeader sits directly underneath.
             VStack(spacing: 0) {
                 PlayerHeader()
                 TranscriptScrollView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.top, Geo.statusBarReserve)
             .ignoresSafeArea(edges: .bottom)
 
-            // Bottom controls — fades in over the transcript with a soft scrim.
-            VStack(spacing: 28) {
-                ProgressBar()
-                PrimaryControls()
-                SecondaryRow()
-                Color.clear.frame(height: 6)
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 24)
-            .padding(.bottom, 30)
-            .background(
+            // Bottom controls: fade region (transcript can show through here)
+            // followed by a solid section that owns the progress bar, primary
+            // controls, and listening pill. The solid section's bg prevents
+            // transcript text from bleeding through the progress track.
+            VStack(spacing: 0) {
                 LinearGradient(
-                    stops: [
-                        .init(color: Ambient.bg.opacity(0),  location: 0.0),
-                        .init(color: Ambient.bg.opacity(0.95), location: 0.18),
-                        .init(color: Ambient.bg.opacity(1.0), location: 0.35),
-                    ],
+                    colors: [Ambient.bg.opacity(0), Ambient.bg],
                     startPoint: .top, endPoint: .bottom
                 )
+                .frame(height: 80)
                 .allowsHitTesting(false)
-            )
+
+                VStack(spacing: 26) {
+                    ProgressBar()
+                    PrimaryControls()
+                    SecondaryRow()
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 4)
+                .padding(.bottom, 12)
+                .background(Ambient.bg)
+            }
 
             if state.voiceOpen {
                 VoiceAgentView(qaIndex: state.qaIdx)

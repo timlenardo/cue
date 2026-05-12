@@ -82,23 +82,44 @@ struct Palette: Equatable {
         scrimBot: Color(hex: "E8EDE3", opacity: 0.85),
         statusDark: false
     )
+
+    /// Dark warm-black background with a sage-green accent. Matches the
+    /// player's own styling so the whole app feels like one piece.
+    static let ambient = Palette(
+        bg: Color(hex: "0A0908"),
+        surface: Color(hex: "1A1612"),
+        ink: Color(hex: "E2E8F0"),
+        inkSoft: Color(hex: "D4D4D8"),
+        inkMuted: Color(hex: "71717A"),
+        inkFade: Color(hex: "71717A", opacity: 0.6),
+        accent: Color(hex: "A8D5BA"),
+        accentSoft: Color(hex: "A8D5BA", opacity: 0.14),
+        subtle: Color(hex: "2D241A", opacity: 0.4),
+        subtleStrong: Color(hex: "27272A"),
+        cardEdge: Color(hex: "2D241A"),
+        scrimTop: Color(hex: "0A0908", opacity: 0.1),
+        scrimBot: Color(hex: "0A0908", opacity: 0.88),
+        statusDark: true
+    )
 }
 
 enum PaletteName: String, CaseIterable, Identifiable {
-    case paper, ink, forest
+    case ambient, paper, ink, forest
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .paper: return "Paper"
-        case .ink: return "Ink"
-        case .forest: return "Forest"
+        case .ambient: return "Ambient"
+        case .paper:   return "Paper"
+        case .ink:     return "Ink"
+        case .forest:  return "Forest"
         }
     }
     var palette: Palette {
         switch self {
-        case .paper: return .paper
-        case .ink: return .ink
-        case .forest: return .forest
+        case .ambient: return .ambient
+        case .paper:   return .paper
+        case .ink:     return .ink
+        case .forest:  return .forest
         }
     }
 }

@@ -47,7 +47,7 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(idx, forKey: speedIdxKey)
     }
 
-    @Published var paletteName: PaletteName = .paper
+    @Published var paletteName: PaletteName = .ambient
 
     @Published var loadPhase: LoadPhase = .idle
     @Published var live: LiveEpisode?
