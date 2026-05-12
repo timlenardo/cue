@@ -65,7 +65,7 @@ struct EntryView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 6)
-                .padding(.bottom, Geo.tabBarHeight + 24)
+                .padding(.bottom, state.bottomDockHeight + 24)
             }
         }
         .padding(.top, Geo.statusBarReserve)

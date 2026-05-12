@@ -27,7 +27,7 @@ struct LibraryView: View {
             }
         }
         .padding(.top, Geo.statusBarReserve)
-        .padding(.bottom, Geo.tabBarHeight)
+        .padding(.bottom, state.bottomDockHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.bg.ignoresSafeArea())
     }
@@ -116,64 +116,88 @@ private struct NowPlayingCard: View {
             return ep.showTitle
         }()
 
-        Button {
-            Task { await state.openFromLibrary(item) }
-        } label: {
-            HStack(spacing: 14) {
-                ShowMonogram(text: ep.showTitle, size: 72, radius: 14)
+        let isLive = state.isLive(episodeId: ep.id)
+        let isPlayingNow = state.isPlaying(episodeId: ep.id)
+        let eyebrow: String = {
+            if isLive && isPlayingNow { return "NOW PLAYING" }
+            if isLive { return "PAUSED" }
+            if inProgress { return "RESUME" }
+            if item.completedAt != nil { return "PLAYED" }
+            return "READY TO PLAY"
+        }()
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(inProgress ? "RESUME" : (item.completedAt != nil ? "PLAYED" : "READY TO PLAY"))
-                        .font(Fonts.sans(10.5, weight: .bold))
-                        .tracking(1)
-                        .foregroundStyle(palette.accent)
-                    Text(ep.episodeTitle)
-                        .font(Fonts.serif(17, weight: .medium))
-                        .tracking(-0.2)
-                        .lineSpacing(2)
-                        .foregroundStyle(palette.ink)
-                        .multilineTextAlignment(.leading)
-                        .lineLimit(2)
-                    Text(subline)
-                        .font(Fonts.sans(11.5))
-                        .foregroundStyle(palette.inkMuted)
-                        .padding(.top, 1)
-                        .lineLimit(1)
+        HStack(spacing: 14) {
+            ShowMonogram(text: ep.showTitle, size: 72, radius: 14)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(eyebrow)
+                    .font(Fonts.sans(10.5, weight: .bold))
+                    .tracking(1)
+                    .foregroundStyle(palette.accent)
+                Text(ep.episodeTitle)
+                    .font(Fonts.serif(17, weight: .medium))
+                    .tracking(-0.2)
+                    .lineSpacing(2)
+                    .foregroundStyle(palette.ink)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2)
+                Text(subline)
+                    .font(Fonts.sans(11.5))
+                    .foregroundStyle(palette.inkMuted)
+                    .padding(.top, 1)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isLive {
+                    state.openPlayer()
+                } else {
+                    Task { await state.openFromLibrary(item) }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
-                Image(systemName: "play.fill")
+            // Trailing play/pause button — reflects live playback when this
+            // episode is the active one, otherwise loads + plays from library.
+            Button {
+                if isLive {
+                    state.togglePlay()
+                } else {
+                    Task { await state.openFromLibrary(item) }
+                }
+            } label: {
+                Image(systemName: isPlayingNow ? "pause.fill" : "play.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(palette.bg)
                     .frame(width: 40, height: 40)
                     .background(Circle().fill(palette.ink))
             }
-            .padding(16)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(palette.surface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .strokeBorder(palette.cardEdge, lineWidth: 0.5)
-                    )
-            )
-            .overlay(alignment: .bottom) {
-                if inProgress, ep.durationSeconds != nil {
-                    GeometryReader { proxy in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(palette.subtleStrong)
-                            Capsule().fill(palette.accent)
-                                .frame(width: proxy.size.width * CGFloat(min(1, progress)))
-                        }
+            .buttonStyle(.plain)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(palette.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(palette.cardEdge, lineWidth: 0.5)
+                )
+        )
+        .overlay(alignment: .bottom) {
+            if inProgress, ep.durationSeconds != nil {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(palette.subtleStrong)
+                        Capsule().fill(palette.accent)
+                            .frame(width: proxy.size.width * CGFloat(min(1, progress)))
                     }
-                    .frame(height: 3)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 6)
                 }
+                .frame(height: 3)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 6)
             }
         }
-        .buttonStyle(.plain)
         .contextMenu {
             Button(role: .destructive) {
                 Task { await state.removeFromLibrary(episodeId: ep.id) }

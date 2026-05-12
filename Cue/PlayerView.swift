@@ -93,6 +93,12 @@ private struct PlayerHeader: View {
 private struct TranscriptScrollView: View {
     @EnvironmentObject var state: AppState
 
+    /// Tracks whether auto-scroll is still glued to the active sentence.
+    /// Set to false when the user touches the scroll view; reset to true
+    /// when the user taps the "Return to current" button (or scrolls back
+    /// near the active sentence themselves).
+    @State private var followsActive: Bool = true
+
     var activeSentenceIdx: Int {
         let t = state.currentTime
         var idx = 0
@@ -116,53 +122,89 @@ private struct TranscriptScrollView: View {
         let sentences = state.transcriptSentences
 
         ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(sentences) { sentence in
-                        SentenceBlock(
-                            sentence: sentence,
-                            isActive: sentence.id == activeIdx,
-                            isPast: sentence.id < activeIdx,
-                            isFirstFromSpeaker: isFirstFromSpeaker(sentence: sentence, in: sentences),
-                            activeWordIdx: activeWordIdx
-                        )
-                        .id(sentence.id)
-                    }
+            ZStack(alignment: .top) {
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        ForEach(sentences) { sentence in
+                            SentenceBlock(
+                                sentence: sentence,
+                                isActive: sentence.id == activeIdx,
+                                isPast: sentence.id < activeIdx,
+                                isFirstFromSpeaker: isFirstFromSpeaker(sentence: sentence, in: sentences),
+                                activeWordIdx: activeWordIdx
+                            )
+                            .id(sentence.id)
+                        }
 
-                    // "Audio continues" placeholder card.
-                    Text("Transcript continues live \u{2193}")
-                        .font(Fonts.mono(11))
-                        .tracking(0.4)
-                        .foregroundStyle(palette.inkMuted)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 14)
-                        .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(palette.cardEdge, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                        )
-                        .padding(.top, 18)
+                        // "Audio continues" placeholder card.
+                        Text("Transcript continues live \u{2193}")
+                            .font(Fonts.mono(11))
+                            .tracking(0.4)
+                            .foregroundStyle(palette.inkMuted)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 14)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(palette.cardEdge, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                            )
+                            .padding(.top, 18)
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.top, 12)
+                    .padding(.bottom, 220)
                 }
-                .padding(.horizontal, 22)
-                .padding(.top, 12)
-                .padding(.bottom, 220)
-            }
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .black, location: 0.04),
-                        .init(color: .black, location: 0.85),
-                        .init(color: .clear, location: 1.0),
-                    ],
-                    startPoint: .top, endPoint: .bottom
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .black, location: 0.04),
+                            .init(color: .black, location: 0.85),
+                            .init(color: .clear, location: 1.0),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
                 )
-            )
-            .onChange(of: activeIdx) { _, newIdx in
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    proxy.scrollTo(newIdx, anchor: UnitPoint(x: 0.5, y: 0.32))
+                .onScrollPhaseChange { _, newPhase in
+                    // The user touched the scroller — stop auto-following.
+                    if newPhase == .interacting {
+                        followsActive = false
+                    }
+                }
+                .onChange(of: activeIdx) { _, newIdx in
+                    guard followsActive else { return }
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        proxy.scrollTo(newIdx, anchor: UnitPoint(x: 0.5, y: 0.32))
+                    }
+                }
+
+                // Floating "Return to current position" pill.
+                if !followsActive {
+                    Button {
+                        followsActive = true
+                        withAnimation(.easeInOut(duration: 0.35)) {
+                            proxy.scrollTo(activeIdx, anchor: UnitPoint(x: 0.5, y: 0.32))
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Return to playing")
+                                .font(Fonts.sans(12, weight: .semibold))
+                                .tracking(-0.1)
+                        }
+                        .foregroundStyle(palette.bg)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(palette.ink))
+                        .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
+            .animation(.easeOut(duration: 0.2), value: followsActive)
         }
     }
 

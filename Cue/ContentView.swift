@@ -19,9 +19,15 @@ struct ContentView: View {
                 }
             }
 
-            // Tab bar always at the bottom.
+            // Mini player + tab bar at the bottom. Mini player is visible
+            // whenever an episode is loaded and the full player isn't open.
             VStack(spacing: 0) {
                 Spacer()
+                if state.live != nil && !state.playerOpen {
+                    MiniPlayerBar()
+                        .padding(.bottom, 6)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 TabBarView()
             }
 
@@ -34,6 +40,7 @@ struct ContentView: View {
         }
         .animation(.easeOut(duration: 0.28), value: state.tab)
         .animation(.easeOut(duration: 0.28), value: state.playerOpen)
+        .animation(.easeOut(duration: 0.22), value: state.live != nil)
     }
 }
 
@@ -76,7 +83,7 @@ struct ComingSoonView: View {
             .frame(maxWidth: .infinity)
 
             Spacer(minLength: 0)
-            Spacer(minLength: Geo.tabBarHeight + 20)
+            Spacer(minLength: state.bottomDockHeight + 20)
         }
         .padding(.top, Geo.statusBarReserve)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

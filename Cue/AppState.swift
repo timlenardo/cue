@@ -30,8 +30,22 @@ final class AppState: ObservableObject {
 
     @Published var currentTime: Double = 0
     @Published var playing: Bool = false
-    @Published var speedIdx: Int = 0
+    @Published var speedIdx: Int = AppState.loadSpeedIdx() {
+        didSet { AppState.saveSpeedIdx(speedIdx) }
+    }
     @Published var qaIdx: Int = 0
+
+    private static let speedIdxKey = "cue.speedIdx"
+
+    private static func loadSpeedIdx() -> Int {
+        let raw = UserDefaults.standard.integer(forKey: speedIdxKey)
+        guard raw >= 0, raw < Speeds.values.count else { return 0 }
+        return raw
+    }
+
+    private static func saveSpeedIdx(_ idx: Int) {
+        UserDefaults.standard.set(idx, forKey: speedIdxKey)
+    }
 
     @Published var paletteName: PaletteName = .paper
 
@@ -403,6 +417,28 @@ final class AppState: ObservableObject {
         if live != nil { return episodeShowName.uppercased() }
         let meta = SampleData.episodeMeta
         return "EP \(meta.number) · \(meta.show)".uppercased()
+    }
+
+    /// Height to leave clear at the bottom of any scroll view so its content
+    /// isn't covered by the tab bar (always) + mini player bar (when an
+    /// episode is loaded).
+    var bottomDockHeight: CGFloat {
+        live != nil && !playerOpen
+            ? Geo.tabBarHeight + Geo.miniPlayerHeight - 2
+            : Geo.tabBarHeight
+    }
+
+    /// True iff the given library episode is what's loaded in the player
+    /// right now.
+    func isLive(episodeId: Int) -> Bool {
+        live?.serverEpisodeId == episodeId
+    }
+
+    /// True iff this episode is loaded AND currently playing. Driven by the
+    /// mirrored `playing` flag (not `audio.isPlaying` directly) so SwiftUI
+    /// reactively re-renders when playback state changes.
+    func isPlaying(episodeId: Int) -> Bool {
+        isLive(episodeId: episodeId) && playing
     }
 
     var transcriptSentences: [TranscriptSentence] {
