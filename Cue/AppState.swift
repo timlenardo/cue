@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import AVFAudio
 
 enum Tab: String { case listen, library, notes }
 
@@ -69,6 +70,15 @@ final class AppState: ObservableObject {
         startProgressSyncTimer()
         NowPlayingCenter.shared.attach(self)
 
+        #if DEBUG
+        // Diagnostic: log a single line every ~2s confirming the mic tap is
+        // delivering buffers. Remove once the real wake-word listener is in.
+        let diag = MicCaptureDiag()
+        MicCapture.shared.addBufferHandler { buffer, _ in
+            diag.tick(frames: Int(buffer.frameLength), sampleRate: buffer.format.sampleRate)
+        }
+        #endif
+
         // Mirror AudioPlayer's time + playing state into AppState's @Published
         // properties so transcript/progress views update reactively.
         audio.$currentTime
@@ -115,8 +125,29 @@ final class AppState: ObservableObject {
                     playing: p,
                     duration: self.totalDuration
                 )
+                // Mic capture follows playback: on while a podcast is playing,
+                // off when paused. This is what gives the wake-word listener
+                // a stream of audio buffers to scan exactly when it's useful.
+                Task { @MainActor in await self.syncMicToPlayback(playing: p) }
             }
             .store(in: &audioSubs)
+    }
+
+    /// Bring MicCapture in line with the current playback state. Requests
+    /// permission lazily the first time we'd start the mic.
+    private func syncMicToPlayback(playing: Bool) async {
+        guard live != nil else {
+            MicCapture.shared.stop(force: true)
+            return
+        }
+        if playing {
+            if MicCapture.shared.currentPermission() == .undetermined {
+                await MicCapture.shared.requestPermission()
+            }
+            MicCapture.shared.start()
+        } else {
+            MicCapture.shared.stop(force: true)
+        }
     }
 
     private var lastNowPlayingSecond: Int = -1
@@ -354,6 +385,7 @@ final class AppState: ObservableObject {
         currentTime = 0
         NowPlayingCenter.shared.clear()
         LiveActivityController.shared.end()
+        MicCapture.shared.stop(force: true)
         minimizePlayer()
     }
 
@@ -392,3 +424,27 @@ final class AppState: ObservableObject {
         return current
     }
 }
+
+#if DEBUG
+/// Tiny helper to count buffers from the audio thread without tripping
+/// Swift 6 sendability rules. Internally synchronized with a lock.
+private final class MicCaptureDiag: @unchecked Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var bufferCount = 0
+    nonisolated(unsafe) private var lastLogAt = Date(timeIntervalSince1970: 0)
+
+    nonisolated func tick(frames: Int, sampleRate: Double) {
+        lock.lock()
+        bufferCount += 1
+        let now = Date()
+        if now.timeIntervalSince(lastLogAt) >= 2.0 {
+            lastLogAt = now
+            let count = bufferCount
+            lock.unlock()
+            print("[MicCapture diag] \(count) buffers · \(frames) frames @ \(Int(sampleRate)) Hz")
+        } else {
+            lock.unlock()
+        }
+    }
+}
+#endif

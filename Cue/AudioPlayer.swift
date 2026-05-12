@@ -85,8 +85,20 @@ final class AudioPlayer: ObservableObject {
     }
 
     private func configureAudioSession() {
+        // .playAndRecord (vs .playback) so MicCapture can run an input tap
+        // simultaneously with podcast playback for the always-on wake-word
+        // listener. .defaultToSpeaker keeps the loudspeaker as output when
+        // no headphones are connected. .allowBluetooth opts in to the HFP
+        // Bluetooth profile (mono, lower quality) so AirPods/headsets keep
+        // working; .allowBluetoothA2DP keeps A2DP (high-quality stereo) on
+        // for output where possible. iOS will pick HFP automatically when
+        // the mic is active.
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .spokenAudio, options: [])
+        try? session.setCategory(
+            .playAndRecord,
+            mode: .spokenAudio,
+            options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP, .allowAirPlay]
+        )
         try? session.setActive(true)
     }
 }
