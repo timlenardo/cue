@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFAudio
 
 /// Top-level router. Shows the auth gate when there's no JWT, otherwise the main app.
 struct RootView: View {
@@ -21,5 +22,14 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(state.palette.statusDark ? .dark : .light)
+        .task { await requestMicPermission() }
+    }
+
+    /// Pre-request mic permission on launch so the first tap on the voice
+    /// agent doesn't have to wait on a system prompt.
+    private func requestMicPermission() async {
+        if AVAudioApplication.shared.recordPermission == .undetermined {
+            _ = await AVAudioApplication.requestRecordPermission()
+        }
     }
 }

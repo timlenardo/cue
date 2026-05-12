@@ -75,12 +75,19 @@ struct EntryView: View {
 
     // MARK: - Paste card
 
+    private var isLoading: Bool {
+        switch state.loadPhase {
+        case .resolving, .transcribing: return true
+        case .idle, .error: return false
+        }
+    }
+
     @ViewBuilder
     private var pasteCard: some View {
         let palette = state.palette
         let platform = detectPlatform(url)
         let trimmed = url.trimmingCharacters(in: .whitespaces)
-        let canListen = !trimmed.isEmpty && state.loadPhase == .idle
+        let canListen = !trimmed.isEmpty && !isLoading
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
@@ -123,17 +130,20 @@ struct EntryView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
-                    .disabled(state.loadPhase != .idle)
+                    .disabled(isLoading)
 
                     if !url.isEmpty {
-                        Button { url = "" } label: {
+                        Button {
+                            url = ""
+                            if case .error = state.loadPhase { state.loadPhase = .idle }
+                        } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(palette.inkMuted)
                                 .padding(6)
                         }
                         .buttonStyle(.plain)
-                        .disabled(state.loadPhase != .idle)
+                        .disabled(isLoading)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -156,22 +166,22 @@ struct EntryView: View {
                         Task { await submit() }
                     } label: {
                         HStack(spacing: 8) {
-                            if state.loadPhase != .idle {
+                            if isLoading {
                                 ProgressView()
                                     .tint(palette.bg)
                                     .scaleEffect(0.8)
                             }
                             Text(submitLabel)
                                 .font(Fonts.sans(13, weight: .semibold))
-                            if state.loadPhase == .idle {
+                            if !isLoading {
                                 Image(systemName: "chevron.right")
                                     .font(.system(size: 10, weight: .bold))
                             }
                         }
-                        .foregroundStyle(canListen || state.loadPhase != .idle ? palette.bg : palette.inkMuted)
+                        .foregroundStyle(canListen || isLoading ? palette.bg : palette.inkMuted)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 9)
-                        .background(Capsule().fill(canListen || state.loadPhase != .idle ? palette.ink : palette.subtleStrong))
+                        .background(Capsule().fill(canListen || isLoading ? palette.ink : palette.subtleStrong))
                     }
                     .buttonStyle(.plain)
                     .disabled(!canListen)

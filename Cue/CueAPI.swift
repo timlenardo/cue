@@ -1,6 +1,24 @@
 import Foundation
 import Combine
 import Security
+import os
+
+// MARK: - Logging
+
+private let log = Logger(subsystem: "com.toug.cue", category: "CueAPI")
+
+private func logBody(_ label: String, _ data: Data?, max: Int = 4000) {
+    guard let data, !data.isEmpty else {
+        log.debug("\(label, privacy: .public): <empty>")
+        return
+    }
+    let s = String(data: data, encoding: .utf8) ?? "<\(data.count) bytes, non-utf8>"
+    if s.count > max {
+        log.debug("\(label, privacy: .public) [\(data.count) bytes, truncated]: \(s.prefix(max), privacy: .public)…")
+    } else {
+        log.debug("\(label, privacy: .public) [\(data.count) bytes]: \(s, privacy: .public)")
+    }
+}
 
 // MARK: - DTOs
 
@@ -91,6 +109,45 @@ private struct LibraryListResponse: Codable {
     let items: [LibraryItem]
 }
 
+// MARK: - Voice realtime DTOs
+
+struct VoiceSessionRequest: Encodable {
+    let audioUrl: String
+    let pausedAtSeconds: Double
+    let totalDurationSeconds: Double?
+    let episodeTitle: String
+    let showTitle: String
+}
+
+/// Response from `POST /v1/voice/session`. `value` is the short-lived
+/// OpenAI Realtime ephemeral token; the iOS client uses it as the Bearer
+/// for the WebRTC SDP exchange against `https://api.openai.com/v1/realtime/calls`.
+/// `contextMessage` is the "[Episode context — last 5 min …]" user-role
+/// message we send into the conversation once the data channel opens.
+struct VoiceSessionResponse: Decodable {
+    let value: String
+    let expiresAt: Int?
+    let contextMessage: String?
+}
+
+struct SearchTranscriptRequest: Encodable {
+    let audioUrl: String
+    let query: String
+    let limit: Int?
+}
+
+struct TranscriptHit: Codable {
+    let fullText: String
+    let matchText: String
+    let matchPositionInSegment: Int
+    let timestampSeconds: Int
+    let timestampLabel: String
+}
+
+struct SearchTranscriptResponse: Codable {
+    let results: [TranscriptHit]
+}
+
 /// Streaming event emitted by `/v1/podcasts/transcribe` (NDJSON).
 enum TranscribeEvent {
     /// Server-side stage label.
@@ -155,6 +212,7 @@ final class CueAPI: ObservableObject {
 
     init() {
         self.token = TokenStore.load()
+        log.info("CueAPI init — baseURL=\(Self.baseURL.absoluteString, privacy: .public) hasToken=\(self.token != nil)")
     }
 
     var isAuthenticated: Bool { token != nil }
@@ -184,6 +242,7 @@ final class CueAPI: ObservableObject {
     }
 
     func signOut() {
+        log.info("signOut")
         TokenStore.clear()
         token = nil
         account = nil
@@ -195,17 +254,55 @@ final class CueAPI: ObservableObject {
         try await post("/v1/podcasts/resolve", body: ["url": url])
     }
 
+    // MARK: - Voice realtime
+
+    /// Mints an OpenAI Realtime ephemeral token and bundles the rolling
+    /// 5-min transcript context for the iOS client to feed in as the
+    /// first conversation item.
+    func requestVoiceSession(
+        audioUrl: String,
+        pausedAtSeconds: Double,
+        totalDurationSeconds: Double?,
+        episodeTitle: String,
+        showTitle: String
+    ) async throws -> VoiceSessionResponse {
+        try await post("/v1/voice/session", body: VoiceSessionRequest(
+            audioUrl: audioUrl,
+            pausedAtSeconds: pausedAtSeconds,
+            totalDurationSeconds: totalDurationSeconds,
+            episodeTitle: episodeTitle,
+            showTitle: showTitle
+        ))
+    }
+
+    /// Server-side handler for the `search_transcript` realtime tool —
+    /// dispatched by the iOS client when it receives that function_call
+    /// event over the WebRTC data channel.
+    func searchTranscript(
+        audioUrl: String,
+        query: String,
+        limit: Int? = nil
+    ) async throws -> SearchTranscriptResponse {
+        try await post("/v1/voice/tools/search-transcript", body: SearchTranscriptRequest(
+            audioUrl: audioUrl,
+            query: query,
+            limit: limit
+        ))
+    }
+
     /// Streams transcribe progress + result as NDJSON events.
     /// The stream completes when the server emits .result or .error.
     func transcribePodcastStream(audioUrl: String, durationSeconds: Double?) -> AsyncThrowingStream<TranscribeEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                let started = Date()
                 do {
                     var body: [String: Any] = ["audioUrl": audioUrl]
                     if let durationSeconds { body["durationSeconds"] = durationSeconds }
                     let data = try JSONSerialization.data(withJSONObject: body)
 
-                    var req = URLRequest(url: URL(string: "/v1/podcasts/transcribe", relativeTo: Self.baseURL)!)
+                    let url = URL(string: "/v1/podcasts/transcribe", relativeTo: Self.baseURL)!
+                    var req = URLRequest(url: url)
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.setValue("application/x-ndjson", forHTTPHeaderField: "Accept")
@@ -213,11 +310,18 @@ final class CueAPI: ObservableObject {
                     req.httpBody = data
                     req.timeoutInterval = 60 * 30   // long-running responses; bytes(for:) holds open.
 
+                    log.info("→ POST /v1/podcasts/transcribe audioUrl=\(audioUrl, privacy: .public) duration=\(durationSeconds ?? -1)")
+                    logBody("→ transcribe req body", data)
+
                     let (bytes, response) = try await session.bytes(for: req)
                     guard let http = response as? HTTPURLResponse else {
+                        log.error("transcribe: non-HTTP response")
                         throw CueAPIError.invalidResponse
                     }
+                    log.info("← \(http.statusCode) /v1/podcasts/transcribe (\(String(format: "%.2f", Date().timeIntervalSince(started)))s to first byte)")
+
                     if http.statusCode == 401 {
+                        log.error("transcribe: 401 — clearing token")
                         TokenStore.clear()
                         await MainActor.run {
                             self.token = nil
@@ -228,23 +332,46 @@ final class CueAPI: ObservableObject {
                     if !(200..<300).contains(http.statusCode) {
                         var dump = ""
                         for try await line in bytes.lines { dump += line; if dump.count > 500 { break } }
+                        log.error("transcribe error body: \(dump, privacy: .public)")
                         throw CueAPIError.server(status: http.statusCode, message: dump.isEmpty ? "Server error" : dump)
                     }
 
+                    var eventCount = 0
                     for try await line in bytes.lines {
                         guard !line.isEmpty else { continue }
+                        log.debug("← ndjson line: \(line.prefix(500), privacy: .public)")
                         if let event = parseEvent(line) {
+                            eventCount += 1
+                            switch event {
+                            case .status(let stage, let n, let bytes, let dur):
+                                log.info("event #\(eventCount) status stage=\(stage, privacy: .public) chunks=\(n ?? -1) bytes=\(bytes ?? -1) dur=\(dur ?? -1)")
+                            case .chunkDone(let i, let n):
+                                log.info("event #\(eventCount) chunk_done \(i + 1)/\(n)")
+                            case .heartbeat:
+                                log.debug("event #\(eventCount) heartbeat")
+                            case .result(let r):
+                                log.info("event #\(eventCount) result words=\(r.words.count) segments=\(r.segments.count) cached=\(r.cached)")
+                            case .error(let m):
+                                log.error("event #\(eventCount) error: \(m, privacy: .public)")
+                            }
                             continuation.yield(event)
                             if case .result = event { break }
                             if case .error = event  { break }
+                        } else {
+                            log.error("transcribe: unparseable ndjson line: \(line, privacy: .public)")
                         }
                     }
+                    log.info("transcribe stream finished — \(eventCount) events, total \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
                     continuation.finish()
                 } catch {
+                    log.error("transcribe stream error after \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(error.localizedDescription, privacy: .public)")
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            continuation.onTermination = { _ in
+                log.debug("transcribe stream terminated")
+                task.cancel()
+            }
         }
     }
 
@@ -310,7 +437,9 @@ final class CueAPI: ObservableObject {
     }
 
     private func send<T: Decodable>(path: String, method: String, bodyData: Data?) async throws -> T {
+        let started = Date()
         guard let url = URL(string: path, relativeTo: Self.baseURL) else {
+            log.error("invalid URL for path=\(path, privacy: .public)")
             throw CueAPIError.invalidURL
         }
         var req = URLRequest(url: url)
@@ -319,10 +448,28 @@ final class CueAPI: ObservableObject {
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         req.httpBody = bodyData
 
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else { throw CueAPIError.invalidResponse }
+        log.info("→ \(method, privacy: .public) \(path, privacy: .public) (auth=\(self.token != nil))")
+        if method != "GET" { logBody("→ req body", bodyData) }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch {
+            log.error("✗ \(method, privacy: .public) \(path, privacy: .public) transport error after \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            log.error("✗ \(method, privacy: .public) \(path, privacy: .public) non-HTTP response")
+            throw CueAPIError.invalidResponse
+        }
+
+        log.info("← \(http.statusCode) \(method, privacy: .public) \(path, privacy: .public) [\(data.count) bytes, \(String(format: "%.2f", Date().timeIntervalSince(started)))s]")
+        logBody("← resp body", data)
 
         if http.statusCode == 401 {
+            log.error("← 401 — clearing token")
             TokenStore.clear()
             token = nil
             account = nil
@@ -332,11 +479,13 @@ final class CueAPI: ObservableObject {
             let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
                    ?? String(data: data, encoding: .utf8)
                    ?? "Server error"
+            log.error("← server error \(http.statusCode): \(msg, privacy: .public)")
             throw CueAPIError.server(status: http.statusCode, message: msg)
         }
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
+            log.error("← decoding error for \(String(describing: T.self), privacy: .public): \(error.localizedDescription, privacy: .public)")
             throw CueAPIError.decoding(error)
         }
     }

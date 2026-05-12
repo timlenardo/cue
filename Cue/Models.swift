@@ -68,12 +68,6 @@ struct EpisodeMeta: Equatable {
     let transcriptDuration: Double
 }
 
-struct SampleQA: Equatable {
-    let q: String
-    let a: [String]
-    var answerJoined: String { a.joined(separator: " \n\n ") }
-}
-
 // MARK: - Formatting helpers
 
 enum Format {

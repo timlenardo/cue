@@ -176,30 +176,4 @@ enum SampleData {
         return current
     }
 
-    // MARK: - Sample voice-agent Q&A
-
-    static let sampleQA: [SampleQA] = [
-        SampleQA(
-            q: "Wait \u{2014} why does the universe expanding pull light into infrared?",
-            a: [
-                "Great question. When light travels through space that itself is stretching, the waves get stretched along with it.",
-                "Visible light has very short wavelengths. When you stretch those waves enough, they slide down into the infrared part of the spectrum \u{2014} same light, just longer waves.",
-                "That's why a regular optical telescope would see almost nothing from these very old galaxies. Webb sees them because Webb sees in infrared.",
-            ]
-        ),
-        SampleQA(
-            q: "How is this different from what Hubble can see?",
-            a: [
-                "Hubble is primarily an optical and ultraviolet telescope, so it sees the universe roughly the way human eyes would.",
-                "Webb is built around a much larger mirror, and its instruments are tuned for infrared. That combination lets it pick up faint, redshifted light from galaxies that formed in the first few hundred million years after the Big Bang.",
-            ]
-        ),
-        SampleQA(
-            q: "What do you mean by 'redshifted'?",
-            a: [
-                "Redshift is the term for that stretching effect. The further away a galaxy is, the more its light has been stretched toward red \u{2014} and beyond, into infrared.",
-                "Astronomers actually use the amount of redshift to estimate how far back in time they're seeing.",
-            ]
-        ),
-    ]
 }

@@ -1,111 +1,193 @@
 import SwiftUI
 import Combine
 
-enum VoicePhase { case listening, transcribing, thinking, responding, done }
+/// UI phase enum — derived from `RealtimeVoiceSession.Phase` so the
+/// existing decoration views (`MicHalo`, `PausedDot`) don't need to
+/// learn the realtime vocabulary.
+enum VoicePhase { case connecting, listening, transcribing, thinking, responding, done, error }
 
-@MainActor
-final class VoiceAgentModel: ObservableObject {
-    @Published var phase: VoicePhase = .listening
-    @Published var qIdx: Int = 0
-    @Published var aIdx: Int = 0
-
-    let qa: SampleQA
-
-    private var streamTimer: AnyCancellable?
-    private var phaseTimer: AnyCancellable?
-
-    init(qa: SampleQA) { self.qa = qa }
-
-    deinit {
-        streamTimer?.cancel()
-        phaseTimer?.cancel()
+private func uiPhase(from session: RealtimeVoiceSession.Phase) -> VoicePhase {
+    switch session {
+    case .idle, .connecting: return .connecting
+    case .listening:         return .listening
+    case .thinking:          return .thinking
+    case .speaking:          return .responding
+    case .ended:             return .done
+    case .error:             return .error
     }
+}
 
-    func cancel() {
-        streamTimer?.cancel(); streamTimer = nil
-        phaseTimer?.cancel(); phaseTimer = nil
-    }
+/// Public entry. Reads the optional session off AppState; SwiftUI can't
+/// observe an optional ObservableObject directly, so when a session is
+/// active we hand it to `VoiceAgentLiveBody` which observes it via
+/// `@ObservedObject`. When there is no session (canned-sample mode or
+/// no live episode), we render a "load an episode" placeholder.
+struct VoiceAgentView: View {
+    @EnvironmentObject var state: AppState
 
-    // MARK: - Phase machine
-
-    func start() {
-        startListening()
-    }
-
-    private func startListening() {
-        phaseTimer = Just(())
-            .delay(for: .milliseconds(1100), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in self?.startTranscribing() }
-    }
-
-    private func startTranscribing() {
-        phase = .transcribing
-        let total = qa.q.count
-        streamTimer = Timer.publish(every: 0.028, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self else { return }
-                qIdx = min(total, qIdx + 2)
-                if qIdx >= total {
-                    streamTimer?.cancel(); streamTimer = nil
-                    phaseTimer = Just(())
-                        .delay(for: .milliseconds(350), scheduler: DispatchQueue.main)
-                        .sink { [weak self] _ in self?.startThinking() }
-                }
-            }
-    }
-
-    private func startThinking() {
-        phase = .thinking
-        phaseTimer = Just(())
-            .delay(for: .milliseconds(850), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in self?.startResponding() }
-    }
-
-    private func startResponding() {
-        phase = .responding
-        let total = qa.answerJoined.count
-        streamTimer = Timer.publish(every: 0.022, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self else { return }
-                aIdx = min(total, aIdx + 3)
-                if aIdx >= total {
-                    streamTimer?.cancel(); streamTimer = nil
-                    phaseTimer = Just(())
-                        .delay(for: .milliseconds(350), scheduler: DispatchQueue.main)
-                        .sink { [weak self] _ in self?.phase = .done }
-                }
-            }
-    }
-
-    var questionShown: String { String(qa.q.prefix(qIdx)) }
-    var answerShown: String   { String(qa.answerJoined.prefix(aIdx)) }
-
-    var statusLabel: String {
-        switch phase {
-        case .listening, .transcribing: return "Listening"
-        case .thinking:                 return "Thinking"
-        case .responding:               return "Speaking"
-        case .done:                     return "Tap to ask again"
+    var body: some View {
+        if let session = state.voiceSession {
+            VoiceAgentLiveBody(session: session)
+        } else {
+            VoiceAgentEmptyBody()
         }
     }
 }
 
-struct VoiceAgentView: View {
-    @EnvironmentObject var state: AppState
-    @StateObject private var vm: VoiceAgentModel
+// MARK: - Live body (session present)
 
-    init(qaIndex: Int) {
-        let qa = SampleData.sampleQA[abs(qaIndex) % SampleData.sampleQA.count]
-        _vm = StateObject(wrappedValue: VoiceAgentModel(qa: qa))
+private struct VoiceAgentLiveBody: View {
+    @EnvironmentObject var state: AppState
+    @ObservedObject var session: RealtimeVoiceSession
+
+    private var phase: VoicePhase { uiPhase(from: session.phase) }
+
+    private var statusLabel: String {
+        if let err = session.errorMessage { return "Error: \(err)" }
+        switch phase {
+        case .connecting:    return "Connecting…"
+        case .listening:     return "Listening"
+        case .transcribing:  return "Listening"
+        case .thinking:      return "Thinking"
+        case .responding:    return "Speaking"
+        case .done:          return "Tap to ask again"
+        case .error:         return "Error"
+        }
     }
 
     var body: some View {
         let palette = state.palette
+        let userText = session.userTranscript
+        let assistantText = session.assistantTranscript
+        let hasContent = !userText.isEmpty || !assistantText.isEmpty
 
+        VoiceSheetScaffold(palette: palette) {
+            sheetHeader(palette: palette)
+
+            if !userText.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text(userText)
+                    if phase == .listening { Caret(color: palette.accent) }
+                }
+                .font(Fonts.serif(22, weight: .medium))
+                .tracking(-0.1)
+                .lineSpacing(6)
+                .foregroundStyle(palette.ink)
+                .multilineTextAlignment(.leading)
+            }
+
+            if !assistantText.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text(assistantText)
+                    if phase == .responding { Caret(color: palette.accent) }
+                }
+                .font(Fonts.sans(15))
+                .lineSpacing(6)
+                .foregroundStyle(palette.inkSoft)
+                .multilineTextAlignment(.leading)
+                .transition(.opacity)
+            }
+
+            if !hasContent {
+                Text("Ask anything about \"\(state.live?.episode.title ?? "this episode")\".")
+                    .font(Fonts.sans(15))
+                    .foregroundStyle(palette.inkMuted)
+                    .multilineTextAlignment(.leading)
+            }
+
+            bottomRow(palette: palette)
+        }
+    }
+
+    @ViewBuilder
+    private func sheetHeader(palette: Palette) -> some View {
+        HStack(alignment: .top) {
+            HStack(spacing: 10) {
+                MicHalo(phase: phase, accent: palette.accent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("CUE")
+                        .font(Fonts.sans(11, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(palette.accent)
+                    HStack(spacing: 4) {
+                        Text(statusLabel)
+                            .font(Fonts.sans(13, weight: .medium))
+                            .foregroundStyle(palette.inkMuted)
+                        if phase == .thinking { ThinkingDots(color: palette.inkMuted) }
+                    }
+                }
+            }
+            Spacer()
+            CloseButton(palette: palette) { state.resumeAfterVoice() }
+        }
+    }
+
+    @ViewBuilder
+    private func bottomRow(palette: Palette) -> some View {
+        HStack {
+            HStack(spacing: 6) {
+                PausedDot(active: phase != .done && phase != .error, accent: palette.accent)
+                Text("Podcast paused")
+                    .font(Fonts.sans(12))
+                    .foregroundStyle(palette.inkMuted)
+            }
+            Spacer()
+            Button { state.resumeAfterVoice() } label: {
+                Text("Resume podcast")
+                    .font(Fonts.sans(13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(palette.accent))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.top, 4)
+    }
+}
+
+// MARK: - Empty body (no live episode loaded)
+
+private struct VoiceAgentEmptyBody: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        let palette = state.palette
+        VoiceSheetScaffold(palette: palette) {
+            HStack(alignment: .top) {
+                HStack(spacing: 10) {
+                    MicHalo(phase: .done, accent: palette.accent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("CUE")
+                            .font(Fonts.sans(11, weight: .semibold))
+                            .tracking(0.6)
+                            .foregroundStyle(palette.accent)
+                        Text("Load an episode to talk")
+                            .font(Fonts.sans(13, weight: .medium))
+                            .foregroundStyle(palette.inkMuted)
+                    }
+                }
+                Spacer()
+                CloseButton(palette: palette) { state.resumeAfterVoice() }
+            }
+
+            Text("Paste a podcast URL on the home screen to load a transcript, then ask Cue about it.")
+                .font(Fonts.sans(15))
+                .foregroundStyle(palette.inkMuted)
+                .multilineTextAlignment(.leading)
+        }
+    }
+}
+
+// MARK: - Shared scaffold + decorations
+
+private struct VoiceSheetScaffold<Content: View>: View {
+    let palette: Palette
+    @ViewBuilder let content: () -> Content
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
         ZStack(alignment: .bottom) {
-            // Scrim
             LinearGradient(
                 stops: [
                     .init(color: palette.scrimTop, location: 0),
@@ -117,93 +199,8 @@ struct VoiceAgentView: View {
             .contentShape(Rectangle())
             .onTapGesture { state.resumeAfterVoice() }
 
-            // Sheet
             VStack(alignment: .leading, spacing: 14) {
-                // Top row
-                HStack(alignment: .top) {
-                    HStack(spacing: 10) {
-                        MicHalo(phase: vm.phase, accent: palette.accent)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("CUE")
-                                .font(Fonts.sans(11, weight: .semibold))
-                                .tracking(0.6)
-                                .foregroundStyle(palette.accent)
-                            HStack(spacing: 4) {
-                                Text(vm.statusLabel)
-                                    .font(Fonts.sans(13, weight: .medium))
-                                    .foregroundStyle(palette.inkMuted)
-                                if vm.phase == .thinking { ThinkingDots(color: palette.inkMuted) }
-                            }
-                        }
-                    }
-                    Spacer()
-                    Button { state.resumeAfterVoice() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(palette.inkMuted)
-                            .frame(width: 32, height: 32)
-                            .background(Circle().fill(palette.subtle))
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                // Question
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    Text(vm.questionShown)
-                    if vm.phase == .transcribing { Caret(color: palette.accent) }
-                }
-                .font(Fonts.serif(22, weight: .medium))
-                .tracking(-0.1)
-                .lineSpacing(6)
-                .foregroundStyle(palette.ink)
-                .multilineTextAlignment(.leading)
-
-                // Answer
-                if vm.phase == .responding || vm.phase == .done {
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(vm.answerShown)
-                        if vm.phase == .responding { Caret(color: palette.accent) }
-                    }
-                    .font(Fonts.sans(15))
-                    .lineSpacing(6)
-                    .foregroundStyle(palette.inkSoft)
-                    .multilineTextAlignment(.leading)
-                    .transition(.opacity)
-                }
-
-                // Bottom row
-                HStack {
-                    HStack(spacing: 6) {
-                        PausedDot(active: vm.phase != .done, accent: palette.accent)
-                        Text("Podcast paused")
-                            .font(Fonts.sans(12))
-                            .foregroundStyle(palette.inkMuted)
-                    }
-                    Spacer()
-                    HStack(spacing: 8) {
-                        if vm.phase == .done {
-                            Button { state.askAgain() } label: {
-                                Text("Ask another")
-                                    .font(Fonts.sans(13, weight: .medium))
-                                    .foregroundStyle(palette.ink)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 10)
-                                    .background(Capsule().fill(palette.subtle))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Button { state.resumeAfterVoice() } label: {
-                            Text("Resume podcast")
-                                .font(Fonts.sans(13, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .background(Capsule().fill(palette.accent))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.top, 4)
+                content()
             }
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -220,12 +217,23 @@ struct VoiceAgentView: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 130)
         }
-        .onAppear { vm.start() }
-        .onDisappear { vm.cancel() }
     }
 }
 
-// MARK: - Decorations
+private struct CloseButton: View {
+    let palette: Palette
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(palette.inkMuted)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(palette.subtle))
+        }
+        .buttonStyle(.plain)
+    }
+}
 
 private struct Caret: View {
     let color: Color
@@ -288,7 +296,7 @@ private struct MicHalo: View {
     @State private var animate = false
 
     var active: Bool {
-        phase == .listening || phase == .transcribing || phase == .responding
+        phase == .listening || phase == .transcribing || phase == .responding || phase == .connecting
     }
 
     var body: some View {
