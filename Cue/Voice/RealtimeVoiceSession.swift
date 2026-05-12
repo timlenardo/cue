@@ -135,11 +135,11 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         if let tel = telemetry {
             telemetry = nil
             traceId = nil
-            // Detached so teardown isn't blocked on the final flush.
-            Task.detached {
-                await tel.record(direction: .outbound, type: "session.stop", payload: ["reason": "client_stop"])
-                await tel.stop()
-            }
+            // Record the session-stop ping synchronously so it lands in the
+            // buffer before the final flush; only the flush itself needs to
+            // be detached so teardown doesn't block on it.
+            tel.record(direction: .outbound, type: "session.stop", payload: ["reason": "client_stop"])
+            Task.detached { await tel.stop() }
         }
         teardown()
     }
@@ -284,9 +284,8 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
 
         log.debug("event: \(type, privacy: .public)")
 
-        if let tel = telemetry {
-            Task { await tel.record(direction: .inbound, type: type, payload: json) }
-        }
+        // Synchronous, ordered — see VoiceTelemetry.record's comment.
+        telemetry?.record(direction: .inbound, type: type, payload: json)
 
         switch type {
         case "input_audio_buffer.speech_started":
@@ -404,10 +403,8 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         let buf = RTCDataBuffer(data: data, isBinary: false)
         dc.sendData(buf)
 
-        if let tel = telemetry {
-            let type = (obj["type"] as? String) ?? "unknown"
-            Task { await tel.record(direction: .outbound, type: type, payload: obj) }
-        }
+        let type = (obj["type"] as? String) ?? "unknown"
+        telemetry?.record(direction: .outbound, type: type, payload: obj)
     }
 
     // MARK: - Teardown
