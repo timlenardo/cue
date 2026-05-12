@@ -169,6 +169,10 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
             )
             try session.setMode(.voiceChat)
             try session.setActive(true)
+            // .voiceChat mode ignores .defaultToSpeaker — without this
+            // override, output goes to the earpiece (quiet receiver),
+            // not the loud bottom speaker.
+            try session.overrideOutputAudioPort(.speaker)
         } catch {
             log.error("RTCAudioSession config failed: \(error.localizedDescription, privacy: .public)")
         }
