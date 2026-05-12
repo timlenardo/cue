@@ -419,7 +419,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Cue listens for 'Hey Cue' so you can ask questions about what's playing.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Cue listens for the wake phrase (\"QQ\" or \"Cue Cue\") so you can ask questions about what's playing.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -475,7 +475,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Cue listens for 'Hey Cue' so you can ask questions about what's playing.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Cue listens for the wake phrase (\"QQ\" or \"Cue Cue\") so you can ask questions about what's playing.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;

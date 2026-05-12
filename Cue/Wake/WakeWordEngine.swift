@@ -5,9 +5,9 @@ import OSLog
 import WhisperKit
 
 /// On-device wake-word detector backed by WhisperKit (rolling-window
-/// Whisper inference + regex match). Replaces the previous sherpa-onnx
-/// KWS — same `start()/stop()/onDetect` surface so `AppState` doesn't
-/// care which engine is underneath.
+/// Whisper inference + regex match). `AppState` consumes the engine
+/// through `start() / stop() / onDetect` and doesn't care what's
+/// underneath.
 ///
 /// **How it works**
 /// - Subscribes to `MicCapture.shared` for raw input buffers.
