@@ -67,6 +67,7 @@ final class AppState: ObservableObject {
     init() {
         startSimulatedTimer()
         startProgressSyncTimer()
+        NowPlayingCenter.shared.attach(self)
 
         // Mirror AudioPlayer's time + playing state into AppState's @Published
         // properties so transcript/progress views update reactively.
@@ -74,7 +75,23 @@ final class AppState: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] t in
                 guard let self else { return }
-                if self.live != nil { self.currentTime = t }
+                if self.live != nil {
+                    self.currentTime = t
+                    // Throttle Now-Playing updates to ~1Hz to keep CPU low.
+                    if Int(t) != self.lastNowPlayingSecond {
+                        self.lastNowPlayingSecond = Int(t)
+                        NowPlayingCenter.shared.updatePlayback(
+                            elapsed: t,
+                            rate: self.speed,
+                            playing: self.audio.isPlaying
+                        )
+                        LiveActivityController.shared.update(
+                            elapsed: t,
+                            playing: self.audio.isPlaying,
+                            duration: self.totalDuration
+                        )
+                    }
+                }
             }
             .store(in: &audioSubs)
 
@@ -87,9 +104,22 @@ final class AppState: ObservableObject {
                 if !p && self.live?.serverEpisodeId != nil {
                     self.syncProgress(force: true)
                 }
+                // Reflect play/pause in lock-screen + Live Activity.
+                NowPlayingCenter.shared.updatePlayback(
+                    elapsed: self.currentTime,
+                    rate: self.speed,
+                    playing: p
+                )
+                LiveActivityController.shared.update(
+                    elapsed: self.currentTime,
+                    playing: p,
+                    duration: self.totalDuration
+                )
             }
             .store(in: &audioSubs)
     }
+
+    private var lastNowPlayingSecond: Int = -1
 
     private func startSimulatedTimer() {
         simulatedTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common)
@@ -286,17 +316,44 @@ final class AppState: ObservableObject {
         self.currentTime = resumeAt
         self.qaIdx = 0
         self.lastSyncedPosition = -1
+        self.lastNowPlayingSecond = -1
         if let url = URL(string: live.episode.audioUrl) {
             audio.load(url: url)
             if resumeAt > 0 { audio.seek(to: resumeAt) }
             audio.play()
             audio.setRate(Float(speed))
         }
+        // Tell the OS about the new episode so the lock screen + Dynamic
+        // Island show it immediately, even before audio data arrives.
+        let duration = live.episode.durationSeconds ?? live.transcript.durationSeconds
+        NowPlayingCenter.shared.setEpisode(
+            title: live.episode.title,
+            show: live.show.title,
+            duration: duration
+        )
+        LiveActivityController.shared.start(
+            show: live.show.title,
+            episode: live.episode.title,
+            duration: duration ?? 0,
+            elapsed: resumeAt
+        )
         openPlayer()
     }
 
     func minimizePlayerAndSync() {
         syncProgress(force: true)
+        minimizePlayer()
+    }
+
+    /// Tear down playback completely (called when user explicitly stops/clears).
+    func endPlayback() {
+        syncProgress(force: true)
+        audio.unload()
+        live = nil
+        playing = false
+        currentTime = 0
+        NowPlayingCenter.shared.clear()
+        LiveActivityController.shared.end()
         minimizePlayer()
     }
 
