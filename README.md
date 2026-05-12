@@ -131,6 +131,28 @@ What you should see:
 | "Load an episode to talk" empty state | You hit the mic without loading a live episode (canned-sample mode). Paste a podcast URL on the home screen first. |
 | `404 No cached transcript for this audioUrl` from `/v1/voice/session` | The episode wasn't transcribed yet. Tap pause/replay flow to retrigger `/v1/podcasts/transcribe`, or pick an episode you've used before. |
 
+## Working with worktrees
+
+When using `bash /Users/douglasqian/multi-agent-harness/scripts/create-worktree.sh <repo> <slug>` to spin up a sibling worktree, two pieces of state are gitignored and therefore **don't** follow the new worktree automatically:
+
+- `vendor/sherpa-onnx.xcframework`
+- `vendor/onnxruntime.xcframework`
+
+Without these, `xcodebuild` fails with `There is no XCFramework found at '.../vendor/<name>.xcframework'`.
+
+After creating the worktree, hydrate `vendor/` one of two ways:
+
+```sh
+# Option A — copy from a sibling worktree that already has them:
+cp -R /Users/douglasqian/cue/vendor/onnxruntime.xcframework  /Users/douglasqian/<slug>/vendor/
+cp -R /Users/douglasqian/cue/vendor/sherpa-onnx.xcframework  /Users/douglasqian/<slug>/vendor/
+
+# Option B — re-download via the bootstrap script:
+bash /Users/douglasqian/<slug>/vendor/bootstrap.sh
+```
+
+Option A is instant; Option B re-fetches the ~80 MB archives. The KWS model files under `Cue/Wake/Resources/kws-model/` and the WebRTC SwiftPM package both follow the worktree on their own — only the two xcframeworks need to be hydrated.
+
 ## How to commit your own changes here
 
 This branch already contains your previously-uncommitted wake-word WIP (committed as `Wake-word integration (sherpa-onnx KWS for "Hey Cue")`) plus the voice realtime work on top. When you're ready to land it:
