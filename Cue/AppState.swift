@@ -61,7 +61,6 @@ final class AppState: ObservableObject {
     @Published var voiceSession: RealtimeVoiceSession?
 
     let audio = AudioPlayer()
-    let wake = WakeWordEngine()
     private var audioSubs: Set<AnyCancellable> = []
     private var progressSyncTimer: AnyCancellable?
     private var lastSyncedPosition: Double = -1
@@ -98,8 +97,6 @@ final class AppState: ObservableObject {
             diag.tick(frames: Int(buffer.frameLength), sampleRate: buffer.format.sampleRate)
         }
         #endif
-
-        wake.onDetect = { [weak self] in self?.openMic() }
 
         // Mirror AudioPlayer's time + playing state into AppState's @Published
         // properties so transcript/progress views update reactively.
@@ -231,9 +228,6 @@ final class AppState: ObservableObject {
         withAnimation(.easeOut(duration: 0.32)) { voiceOpen = true }
         // Pause podcast while the agent is open.
         if live != nil { audio.pause() }
-        // The agent owns the mic while it's on screen — avoid two
-        // capture taps fighting for the input bus.
-        wake.stop()
 
         // Spin up a real OpenAI Realtime session whenever we have a live
         // episode. Without `live` there's no audioUrl / transcript to mint
@@ -263,7 +257,6 @@ final class AppState: ObservableObject {
         withAnimation(.easeOut(duration: 0.25)) { voiceOpen = false }
         if live != nil { audio.play(); audio.setRate(Float(speed)) }
         else { playing = true }
-        wake.start()
     }
 
     /// AVPlayer's currentTime when live; falls back to the simulated
@@ -273,12 +266,6 @@ final class AppState: ObservableObject {
         if live != nil { return audio.currentTime }
         return nil
     }
-
-    // MARK: - Wake-word lifecycle
-
-    /// Called from RootView once mic permission is granted / on foreground.
-    func startWakeWord() { if !voiceOpen { wake.start() } }
-    func stopWakeWord()  { wake.stop() }
 
     func seek(_ t: Double) {
         let clamped = max(0, min(totalDuration, t))
