@@ -102,8 +102,9 @@ enum CueAPIError: LocalizedError {
 final class CueAPI: ObservableObject {
     static let shared = CueAPI()
 
-    /// Both staging and prod point at consume-dev for now (mirrors mobile/lib/api.ts).
-    static let baseURL = URL(string: "https://consume-dev-56af3b34f0b8.herokuapp.com")!
+    /// Cue's own backend (github.com/timlenardo/cue-server).
+    /// cue-dev is the auto-deployed staging app; cue-prod is promoted manually.
+    static let baseURL = URL(string: "https://cue-dev-7bd3eabd5817.herokuapp.com")!
 
     @Published private(set) var token: String?
     @Published private(set) var account: CueAccount?
