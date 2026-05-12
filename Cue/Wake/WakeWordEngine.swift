@@ -21,11 +21,27 @@ final class WakeWordEngine: @unchecked Sendable {
     private static let Debounce: TimeInterval = 1.5
     private static let TargetSampleRate: Double = 16_000
     private static let FeatureDim: Int = 80
+    /// Lower threshold = more sensitive (more hits, more false positives).
+    /// 0.25 is the upstream default. In DEBUG we crank it down so we can see
+    /// what the spotter is actually scoring.
+    #if DEBUG
+    private static let KeywordsThreshold: Float = 0.05
+    #else
+    private static let KeywordsThreshold: Float = 0.25
+    #endif
 
     // MARK: - Inference
     private let queue = DispatchQueue(label: "cue.wake.kws", qos: .userInitiated)
     private var spotter: SherpaOnnxKeywordSpotterWrapper?
     private var lastFireAt: Date = .distantPast
+
+    // MARK: - Diagnostics (DEBUG)
+    /// Per-second heartbeat: how many samples have been fed, accumulated
+    /// sum-of-squares for RMS, and decode count since the last log.
+    private var diagWindowStartedAt: Date = Date()
+    private var diagSamplesFed: Int = 0
+    private var diagSumSquares: Double = 0
+    private var diagDecodeCount: Int = 0
 
     // MARK: - Converter (built lazily once we see the first buffer)
     private let convertLock = NSLock()
@@ -46,7 +62,10 @@ final class WakeWordEngine: @unchecked Sendable {
     @MainActor
     func start() {
         guard bufferToken == nil else { return }
-        queue.async { [weak self] in self?.bootIfNeeded() }
+        queue.async { [weak self] in
+            self?.bootIfNeeded()
+            self?.resetDiag()
+        }
         bufferToken = MicCapture.shared.addBufferHandler { [weak self] buffer, _ in
             self?.handle(buffer: buffer)
         }
@@ -107,10 +126,10 @@ final class WakeWordEngine: @unchecked Sendable {
             modelConfig: model,
             keywordsFile: kw.path,
             keywordsScore: 1.5,
-            keywordsThreshold: 0.25
+            keywordsThreshold: Self.KeywordsThreshold
         )
         spotter = withUnsafePointer(to: &config) { SherpaOnnxKeywordSpotterWrapper(config: $0) }
-        log.info("kws spotter ready")
+        log.info("kws spotter ready — threshold=\(Self.KeywordsThreshold)")
     }
 
     /// Called on MicCapture's handler thread (AVAudioEngine input thread).
@@ -165,24 +184,65 @@ final class WakeWordEngine: @unchecked Sendable {
     private func feed(samples: [Float]) {
         guard let spotter else { return }
         spotter.acceptWaveform(samples: samples, sampleRate: Int(Self.TargetSampleRate))
-        while spotter.isReady() { spotter.decode() }
+
+        // Diagnostic accumulators: count samples and sum-of-squares for RMS.
+        diagSamplesFed += samples.count
+        var sumSq: Double = 0
+        for s in samples { sumSq += Double(s) * Double(s) }
+        diagSumSquares += sumSq
+
+        var decodesThisCall = 0
+        while spotter.isReady() {
+            spotter.decode()
+            decodesThisCall += 1
+        }
+        diagDecodeCount += decodesThisCall
 
         let result = spotter.getResult()
         let hit = result.keyword
-        guard !hit.isEmpty else { return }
 
-        // Reset the stream so the same phrase doesn't re-match from
-        // residual internal state.
-        spotter.reset()
+        if !hit.isEmpty {
+            // Reset the stream so the same phrase doesn't re-match from
+            // residual internal state.
+            let tokens = result.tokens.joined(separator: " ")
+            spotter.reset()
 
-        let now = Date()
-        if now.timeIntervalSince(lastFireAt) < Self.Debounce { return }
-        lastFireAt = now
-
-        log.info("wake hit: \(hit)")
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.onDetect?() }
+            let now = Date()
+            if now.timeIntervalSince(lastFireAt) < Self.Debounce {
+                log.info("wake hit (debounced): keyword='\(hit)' tokens='\(tokens)'")
+            } else {
+                lastFireAt = now
+                log.info("wake hit: keyword='\(hit)' tokens='\(tokens)'")
+                DispatchQueue.main.async { [weak self] in
+                    MainActor.assumeIsolated { self?.onDetect?() }
+                }
+            }
         }
+
+        // Heartbeat every ~1s: how much audio we've fed, its RMS (loudness
+        // proxy), and how many decodes ran. Lets you watch the input live
+        // and confirm the spotter is actually consuming it.
+        let now = Date()
+        let elapsed = now.timeIntervalSince(diagWindowStartedAt)
+        if elapsed >= 1.0 {
+            let sps = Int(Double(diagSamplesFed) / elapsed)
+            let rms: Double = diagSamplesFed > 0
+                ? (diagSumSquares / Double(diagSamplesFed)).squareRoot()
+                : 0
+            let rmsDb = rms > 0 ? 20 * log10(rms) : -120
+            log.info("wake heartbeat — \(sps) samples/s, RMS=\(rms, format: .fixed(precision: 4)) (\(rmsDb, format: .fixed(precision: 1)) dBFS), decodes=\(self.diagDecodeCount)")
+            diagWindowStartedAt = now
+            diagSamplesFed = 0
+            diagSumSquares = 0
+            diagDecodeCount = 0
+        }
+    }
+
+    private func resetDiag() {
+        diagWindowStartedAt = Date()
+        diagSamplesFed = 0
+        diagSumSquares = 0
+        diagDecodeCount = 0
     }
 
     private func bundleURL(_ name: String, ext: String) -> URL? {
