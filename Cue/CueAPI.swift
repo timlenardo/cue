@@ -124,10 +124,14 @@ struct VoiceSessionRequest: Encodable {
 /// for the WebRTC SDP exchange against `https://api.openai.com/v1/realtime/calls`.
 /// `contextMessage` is the "[Episode context — last 5 min …]" user-role
 /// message we send into the conversation once the data channel opens.
+/// `traceId` is the LangSmith root run id — present only when tracing is
+/// enabled server-side. iOS echoes it back on `/v1/voice/events` POSTs and
+/// on `/v1/voice/tools/*` calls (via the `x-cue-trace-id` header).
 struct VoiceSessionResponse: Decodable {
     let value: String
     let expiresAt: Int?
     let contextMessage: String?
+    let traceId: String?
 }
 
 struct SearchTranscriptRequest: Encodable {
@@ -293,28 +297,64 @@ final class CueAPI: ObservableObject {
     /// Server-side handler for the `search_transcript` realtime tool —
     /// dispatched by the iOS client when it receives that function_call
     /// event over the WebRTC data channel.
+    ///
+    /// `traceId` + `callId` flow through `x-cue-trace-id` / `x-cue-call-id`
+    /// headers so cue-server can emit a `server_tool:search_transcript`
+    /// LangSmith run that ties back to the originating session + call.
     func searchTranscript(
         audioUrl: String,
         query: String,
-        limit: Int? = nil
+        limit: Int? = nil,
+        traceId: String? = nil,
+        callId: String? = nil
     ) async throws -> SearchTranscriptResponse {
-        try await post("/v1/voice/tools/search-transcript", body: SearchTranscriptRequest(
-            audioUrl: audioUrl,
-            query: query,
-            limit: limit
-        ))
+        try await post(
+            "/v1/voice/tools/search-transcript",
+            body: SearchTranscriptRequest(
+                audioUrl: audioUrl,
+                query: query,
+                limit: limit
+            ),
+            headers: traceHeaders(traceId: traceId, callId: callId)
+        )
     }
 
     /// Server-side handler for the `search_internet` realtime tool. Same
     /// dispatch pattern as `searchTranscript`.
     func searchInternet(
         query: String,
-        limit: Int? = nil
+        limit: Int? = nil,
+        traceId: String? = nil,
+        callId: String? = nil
     ) async throws -> SearchInternetResponse {
-        try await post("/v1/voice/tools/search-internet", body: SearchInternetRequest(
-            query: query,
-            limit: limit
-        ))
+        try await post(
+            "/v1/voice/tools/search-internet",
+            body: SearchInternetRequest(
+                query: query,
+                limit: limit
+            ),
+            headers: traceHeaders(traceId: traceId, callId: callId)
+        )
+    }
+
+    private func traceHeaders(traceId: String?, callId: String?) -> [String: String] {
+        var h: [String: String] = [:]
+        if let t = traceId { h["x-cue-trace-id"] = t }
+        if let c = callId { h["x-cue-call-id"] = c }
+        return h
+    }
+
+    /// Forwards a batch of OpenAI Realtime data-channel events to
+    /// cue-server for LangSmith tracing. Best-effort: the response is
+    /// ignored unless it fails, in which case the caller decides whether
+    /// to surface the error (typically: log + drop).
+    struct VoiceEventsResponse: Decodable {
+        let ok: Bool
+        let traced: Int?
+    }
+    func postVoiceEvents(traceId: String, events: [[String: Any]]) async throws {
+        let body: [String: Any] = ["traceId": traceId, "events": events]
+        let _: VoiceEventsResponse = try await postRaw("/v1/voice/events", body: body)
     }
 
     /// Streams transcribe progress + result as NDJSON events.
@@ -444,14 +484,14 @@ final class CueAPI: ObservableObject {
         try await send(path: path, method: "GET", bodyData: nil)
     }
 
-    private func post<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T {
+    private func post<B: Encodable, T: Decodable>(_ path: String, body: B, headers: [String: String] = [:]) async throws -> T {
         let data = try encoder.encode(body)
-        return try await send(path: path, method: "POST", bodyData: data)
+        return try await send(path: path, method: "POST", bodyData: data, headers: headers)
     }
 
-    private func postRaw<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+    private func postRaw<T: Decodable>(_ path: String, body: [String: Any], headers: [String: String] = [:]) async throws -> T {
         let data = try JSONSerialization.data(withJSONObject: body)
-        return try await send(path: path, method: "POST", bodyData: data)
+        return try await send(path: path, method: "POST", bodyData: data, headers: headers)
     }
 
     private func patchRaw<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
@@ -463,7 +503,7 @@ final class CueAPI: ObservableObject {
         try await send(path: path, method: "DELETE", bodyData: nil)
     }
 
-    private func send<T: Decodable>(path: String, method: String, bodyData: Data?) async throws -> T {
+    private func send<T: Decodable>(path: String, method: String, bodyData: Data?, headers: [String: String] = [:]) async throws -> T {
         let started = Date()
         guard let url = URL(string: path, relativeTo: Self.baseURL) else {
             log.error("invalid URL for path=\(path, privacy: .public)")
@@ -473,6 +513,7 @@ final class CueAPI: ObservableObject {
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         req.httpBody = bodyData
 
         log.info("→ \(method, privacy: .public) \(path, privacy: .public) (auth=\(self.token != nil))")

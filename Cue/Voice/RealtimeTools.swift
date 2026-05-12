@@ -25,7 +25,9 @@ enum RealtimeTools {
         name: String,
         args: [String: Any],
         state: AppState,
-        api: CueAPI
+        api: CueAPI,
+        traceId: String? = nil,
+        callId: String? = nil
     ) async -> ToolDispatchResult {
         log.info("dispatch tool=\(name, privacy: .public)")
 
@@ -60,7 +62,12 @@ enum RealtimeTools {
                 return .nonTerminal(outputJSON: #"{"error":"empty query"}"#)
             }
             do {
-                let resp = try await api.searchTranscript(audioUrl: audioUrl, query: query)
+                let resp = try await api.searchTranscript(
+                    audioUrl: audioUrl,
+                    query: query,
+                    traceId: traceId,
+                    callId: callId
+                )
                 let encoder = JSONEncoder()
                 let data = try encoder.encode(resp)
                 let outputJSON = String(data: data, encoding: .utf8) ?? #"{"results":[]}"#
@@ -78,7 +85,11 @@ enum RealtimeTools {
                 return .nonTerminal(outputJSON: #"{"error":"empty query"}"#)
             }
             do {
-                let resp = try await api.searchInternet(query: query)
+                let resp = try await api.searchInternet(
+                    query: query,
+                    traceId: traceId,
+                    callId: callId
+                )
                 let encoder = JSONEncoder()
                 let data = try encoder.encode(resp)
                 let outputJSON = String(data: data, encoding: .utf8) ?? #"{"results":[]}"#
