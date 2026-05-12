@@ -148,6 +148,21 @@ struct SearchTranscriptResponse: Codable {
     let results: [TranscriptHit]
 }
 
+struct SearchInternetRequest: Encodable {
+    let query: String
+    let limit: Int?
+}
+
+struct InternetHit: Codable {
+    let title: String
+    let url: String
+    let description: String
+}
+
+struct SearchInternetResponse: Codable {
+    let results: [InternetHit]
+}
+
 /// Streaming event emitted by `/v1/podcasts/transcribe` (NDJSON).
 enum TranscribeEvent {
     /// Server-side stage label.
@@ -285,6 +300,18 @@ final class CueAPI: ObservableObject {
     ) async throws -> SearchTranscriptResponse {
         try await post("/v1/voice/tools/search-transcript", body: SearchTranscriptRequest(
             audioUrl: audioUrl,
+            query: query,
+            limit: limit
+        ))
+    }
+
+    /// Server-side handler for the `search_internet` realtime tool. Same
+    /// dispatch pattern as `searchTranscript`.
+    func searchInternet(
+        query: String,
+        limit: Int? = nil
+    ) async throws -> SearchInternetResponse {
+        try await post("/v1/voice/tools/search-internet", body: SearchInternetRequest(
             query: query,
             limit: limit
         ))

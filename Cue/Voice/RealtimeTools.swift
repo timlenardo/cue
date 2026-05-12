@@ -72,7 +72,25 @@ enum RealtimeTools {
                 return .nonTerminal(outputJSON: #"{"error":"\#(msg)"}"#)
             }
 
-        case "search_internet", "save_note":
+        case "search_internet":
+            let query = (args["query"] as? String) ?? ""
+            guard !query.isEmpty else {
+                return .nonTerminal(outputJSON: #"{"error":"empty query"}"#)
+            }
+            do {
+                let resp = try await api.searchInternet(query: query)
+                let encoder = JSONEncoder()
+                let data = try encoder.encode(resp)
+                let outputJSON = String(data: data, encoding: .utf8) ?? #"{"results":[]}"#
+                log.info("search_internet \(resp.results.count) hits for query=\(query, privacy: .public)")
+                return .nonTerminal(outputJSON: outputJSON)
+            } catch {
+                log.error("search_internet failed: \(error.localizedDescription, privacy: .public)")
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "'")
+                return .nonTerminal(outputJSON: #"{"error":"\#(msg)"}"#)
+            }
+
+        case "save_note":
             log.notice("tool \(name, privacy: .public) called but handler not implemented yet")
             return .nonTerminal(outputJSON: #"{"error":"not implemented yet"}"#)
 
