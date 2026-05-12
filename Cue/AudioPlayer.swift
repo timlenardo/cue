@@ -97,7 +97,7 @@ final class AudioPlayer: ObservableObject {
         try? session.setCategory(
             .playAndRecord,
             mode: .spokenAudio,
-            options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP, .allowAirPlay]
+            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .allowAirPlay]
         )
         try? session.setActive(true)
     }

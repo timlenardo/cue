@@ -8,7 +8,7 @@ import OSLog
 /// from `MicCapture.shared` so the input bus is shared cleanly with the
 /// rest of the app — MicCapture owns the AVAudioEngine + tap, we just
 /// register a buffer handler and feed samples to the spotter.
-final class WakeWordEngine {
+final class WakeWordEngine: @unchecked Sendable {
 
     /// Fires whenever the wake phrase is recognised (already on @MainActor).
     /// Reassign or clear by setting to nil. Debounced by `Debounce` seconds.
@@ -43,6 +43,7 @@ final class WakeWordEngine {
     /// Register a handler on `MicCapture.shared`. Idempotent. The mic
     /// itself is started/stopped by AppState based on playback — we just
     /// listen to whatever it delivers.
+    @MainActor
     func start() {
         guard bufferToken == nil else { return }
         queue.async { [weak self] in self?.bootIfNeeded() }
@@ -53,6 +54,7 @@ final class WakeWordEngine {
         log.info("wake handler registered")
     }
 
+    @MainActor
     func stop() {
         if let token = bufferToken {
             MicCapture.shared.removeBufferHandler(token)
