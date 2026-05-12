@@ -164,10 +164,10 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         defer { session.unlockForConfiguration() }
         do {
             try session.setCategory(
-                AVAudioSession.Category.playAndRecord.rawValue,
+                .playAndRecord,
                 with: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]
             )
-            try session.setMode(AVAudioSession.Mode.voiceChat.rawValue)
+            try session.setMode(.voiceChat)
             try session.setActive(true)
         } catch {
             log.error("RTCAudioSession config failed: \(error.localizedDescription, privacy: .public)")
