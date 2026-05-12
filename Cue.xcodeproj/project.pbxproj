@@ -8,8 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		193B62392FB3AA3200FBBF64 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 193B62382FB3AA3200FBBF64 /* WebRTC */; };
-		AFB84D91904482B2D448EC89 /* onnxruntime.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8BE143C693EC644B11A29188 /* onnxruntime.xcframework */; };
-		F0314CFBAE723634D7A299CA /* sherpa-onnx.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 833F43D5A57AC1EB73E7D9FE /* sherpa-onnx.xcframework */; };
+		D1A1A1A32FB3AA3300FBBF64 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = D1A1A1A22FB3AA3300FBBF64 /* WhisperKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,8 +29,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		833F43D5A57AC1EB73E7D9FE /* sherpa-onnx.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = "sherpa-onnx.xcframework"; path = "vendor/sherpa-onnx.xcframework"; sourceTree = SOURCE_ROOT; };
-		8BE143C693EC644B11A29188 /* onnxruntime.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = onnxruntime.xcframework; path = vendor/onnxruntime.xcframework; sourceTree = SOURCE_ROOT; };
 		A70F88D02FB2BCA5003CBC24 /* Cue.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cue.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A70F88DD2FB2BCA6003CBC24 /* CueTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CueTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A70F88E72FB2BCA6003CBC24 /* CueUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CueUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -60,9 +57,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F0314CFBAE723634D7A299CA /* sherpa-onnx.xcframework in Frameworks */,
 				193B62392FB3AA3200FBBF64 /* WebRTC in Frameworks */,
-				AFB84D91904482B2D448EC89 /* onnxruntime.xcframework in Frameworks */,
+				D1A1A1A32FB3AA3300FBBF64 /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -97,8 +93,6 @@
 				A70F88E02FB2BCA6003CBC24 /* CueTests */,
 				A70F88EA2FB2BCA6003CBC24 /* CueUITests */,
 				A70F88D12FB2BCA5003CBC24 /* Products */,
-				833F43D5A57AC1EB73E7D9FE /* sherpa-onnx.xcframework */,
-				8BE143C693EC644B11A29188 /* onnxruntime.xcframework */,
 				193B62372FB3AA3200FBBF64 /* Frameworks */,
 			);
 			sourceTree = "<group>";
@@ -134,6 +128,7 @@
 			name = Cue;
 			packageProductDependencies = (
 				193B62382FB3AA3200FBBF64 /* WebRTC */,
+				D1A1A1A22FB3AA3300FBBF64 /* WhisperKit */,
 			);
 			productName = Cue;
 			productReference = A70F88D02FB2BCA5003CBC24 /* Cue.app */;
@@ -219,6 +214,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				193B62362FB3A7CC00FBBF64 /* XCRemoteSwiftPackageReference "WebRTC" */,
+				D1A1A1A12FB3AA3300FBBF64 /* XCRemoteSwiftPackageReference "WhisperKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A70F88D12FB2BCA5003CBC24 /* Products */;
@@ -422,16 +418,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = NO;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/vendor",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/vendor/sherpa-onnx.xcframework/Headers",
-					"$(PROJECT_DIR)/vendor/onnxruntime.xcframework/Headers",
-				);
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Cue listens for 'Hey Cue' so you can ask questions about what's playing.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -468,7 +455,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Cue/Wake/SherpaOnnx-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -488,16 +474,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = NO;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/vendor",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/vendor/sherpa-onnx.xcframework/Headers",
-					"$(PROJECT_DIR)/vendor/onnxruntime.xcframework/Headers",
-				);
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Cue listens for 'Hey Cue' so you can ask questions about what's playing.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -534,7 +511,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Cue/Wake/SherpaOnnx-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -694,6 +670,14 @@
 				minimumVersion = 147.0.0;
 			};
 		};
+		D1A1A1A12FB3AA3300FBBF64 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/WhisperKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.9.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -701,6 +685,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 193B62362FB3A7CC00FBBF64 /* XCRemoteSwiftPackageReference "WebRTC" */;
 			productName = WebRTC;
+		};
+		D1A1A1A22FB3AA3300FBBF64 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1A1A1A12FB3AA3300FBBF64 /* XCRemoteSwiftPackageReference "WhisperKit" */;
+			productName = WhisperKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
