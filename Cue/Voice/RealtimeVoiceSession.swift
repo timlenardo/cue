@@ -156,25 +156,42 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     }
 
     private func configureAudioSessionForWebRTC() {
-        // Hand the AVAudioSession to RTCAudioSession for the duration of
-        // the call so WebRTC's voice processing (echo cancel / AGC) can
-        // own the mode. We restore the podcast's config in teardown().
+        // Tell WebRTC what category/mode/options to use whenever IT
+        // (re)activates the audio session, otherwise our local override
+        // gets reset the moment audio starts flowing.
+        //
+        // .videoChat routes to the loud speaker by default; .voiceChat
+        // assumes phone-to-ear use and pins output to the earpiece even
+        // when .defaultToSpeaker is set and overrideOutputAudioPort is
+        // called — which is the bug we kept hitting.
+        let webRTCConfig = RTCAudioSessionConfiguration.webRTC()
+        webRTCConfig.category = AVAudioSession.Category.playAndRecord.rawValue
+        webRTCConfig.categoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]
+        webRTCConfig.mode = AVAudioSession.Mode.videoChat.rawValue
+        RTCAudioSessionConfiguration.setWebRTC(webRTCConfig)
+
         let session = RTCAudioSession.sharedInstance()
         session.lockForConfiguration()
         defer { session.unlockForConfiguration() }
         do {
-            try session.setCategory(
-                .playAndRecord,
-                with: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]
-            )
-            try session.setMode(.voiceChat)
-            try session.setActive(true)
-            // .voiceChat mode ignores .defaultToSpeaker — without this
-            // override, output goes to the earpiece (quiet receiver),
-            // not the loud bottom speaker.
+            try session.setConfiguration(webRTCConfig, active: true)
             try session.overrideOutputAudioPort(.speaker)
         } catch {
             log.error("RTCAudioSession config failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Re-assert the loud-speaker route. Safe to call any time after the
+    /// session is active; useful after WebRTC has fully wired up audio
+    /// since its activation can clobber the initial override.
+    private func forceSpeakerOutput() {
+        let session = RTCAudioSession.sharedInstance()
+        session.lockForConfiguration()
+        defer { session.unlockForConfiguration() }
+        do {
+            try session.overrideOutputAudioPort(.speaker)
+        } catch {
+            log.error("overrideOutputAudioPort failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -241,6 +258,10 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     // MARK: - Data channel: open + inbound events
 
     private func handleDataChannelOpen() {
+        // WebRTC has now fully wired up audio — re-assert speaker so its
+        // activation doesn't leave us on the earpiece.
+        forceSpeakerOutput()
+
         if let msg = pendingContextMessage {
             log.info("sending context message (\(msg.count) chars)")
             sendEvent([
@@ -263,6 +284,8 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
             return
         }
 
+        log.debug("event: \(type, privacy: .public)")
+
         switch type {
         case "input_audio_buffer.speech_started":
             phase = .listening
@@ -275,14 +298,31 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         case "response.created":
             phase = .thinking
             assistantTranscript = ""
-        case "response.audio_transcript.delta":
+        // gpt-realtime-2 (GA) emits the `output_audio_transcript.*` variants;
+        // the older beta emitted `audio_transcript.*`. Handle both so the
+        // assistant transcript renders regardless of model version.
+        case "response.audio_transcript.delta",
+             "response.output_audio_transcript.delta":
             if let delta = json["delta"] as? String {
                 assistantTranscript += delta
                 phase = .speaking
             }
-        case "response.audio_transcript.done":
+        case "response.audio_transcript.done",
+             "response.output_audio_transcript.done":
             if let transcript = json["transcript"] as? String {
                 assistantTranscript = transcript
+            }
+        // Fallbacks for text-modality responses (no audio).
+        case "response.text.delta",
+             "response.output_text.delta":
+            if let delta = json["delta"] as? String {
+                assistantTranscript += delta
+                phase = .speaking
+            }
+        case "response.text.done",
+             "response.output_text.done":
+            if let text = (json["text"] as? String) ?? (json["output_text"] as? String) {
+                assistantTranscript = text
             }
         case "response.output_item.done":
             if let item = json["item"] as? [String: Any],
