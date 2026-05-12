@@ -58,6 +58,11 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     private var pendingContextMessage: String?
     private var interruptionObserver: NSObjectProtocol?
 
+    /// Forwards every realtime event to cue-server for LangSmith tracing.
+    /// Non-nil only when the server returned a traceId on session mint.
+    private var telemetry: VoiceTelemetry?
+    private(set) var traceId: String?
+
     /// RTCInitializeSSL must be called exactly once per process. This
     /// static `let` enforces that without us tracking a flag.
     private static let sslInit: Void = {
@@ -99,8 +104,14 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
                 episodeTitle: context.episodeTitle,
                 showTitle: context.showTitle
             )
-            log.info("mint ok value_prefix=\(resp.value.prefix(10), privacy: .public) ctxChars=\(resp.contextMessage?.count ?? 0)")
+            log.info("mint ok value_prefix=\(resp.value.prefix(10), privacy: .public) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(resp.traceId ?? "<none>", privacy: .public)")
             self.pendingContextMessage = resp.contextMessage
+            if let tid = resp.traceId {
+                self.traceId = tid
+                let tel = VoiceTelemetry(traceId: tid, api: api)
+                self.telemetry = tel
+                Task { await tel.start() }
+            }
 
             try setupPeerConnection()
             configureAudioSessionForWebRTC()
@@ -121,6 +132,15 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     func stop() {
         log.info("stop session")
         phase = .ended
+        if let tel = telemetry {
+            telemetry = nil
+            traceId = nil
+            // Detached so teardown isn't blocked on the final flush.
+            Task.detached {
+                await tel.record(direction: .outbound, type: "session.stop", payload: ["reason": "client_stop"])
+                await tel.stop()
+            }
+        }
         teardown()
     }
 
@@ -286,6 +306,10 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
 
         log.debug("event: \(type, privacy: .public)")
 
+        if let tel = telemetry {
+            Task { await tel.record(direction: .inbound, type: type, payload: json) }
+        }
+
         switch type {
         case "input_audio_buffer.speech_started":
             phase = .listening
@@ -354,7 +378,14 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
 
     private func dispatchFunctionCall(name: String, callId: String, args: [String: Any]) async {
         guard let state = state else { return }
-        let result = await RealtimeTools.dispatch(name: name, args: args, state: state, api: api)
+        let result = await RealtimeTools.dispatch(
+            name: name,
+            args: args,
+            state: state,
+            api: api,
+            traceId: traceId,
+            callId: callId
+        )
 
         let outputJSON: String
         switch result {
@@ -394,6 +425,11 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         }
         let buf = RTCDataBuffer(data: data, isBinary: false)
         dc.sendData(buf)
+
+        if let tel = telemetry {
+            let type = (obj["type"] as? String) ?? "unknown"
+            Task { await tel.record(direction: .outbound, type: type, payload: obj) }
+        }
     }
 
     // MARK: - Teardown
