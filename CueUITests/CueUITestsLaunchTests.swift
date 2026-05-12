@@ -1,13 +1,13 @@
 //
-//  orbyUITestsLaunchTests.swift
-//  orbyUITests
+//  CueUITestsLaunchTests.swift
+//  CueUITests
 //
 //  Created by Timothy Lenardo on 5/11/26.
 //
 
 import XCTest
 
-final class orbyUITestsLaunchTests: XCTestCase {
+final class CueUITestsLaunchTests: XCTestCase {
 
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true

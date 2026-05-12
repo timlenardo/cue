@@ -1,13 +1,13 @@
 //
-//  orbyTests.swift
-//  orbyTests
+//  CueTests.swift
+//  CueTests
 //
 //  Created by Timothy Lenardo on 5/11/26.
 //
 
 import XCTest
 
-final class orbyTests: XCTestCase {
+final class CueTests: XCTestCase {
 
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.
