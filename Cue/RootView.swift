@@ -11,6 +11,10 @@ struct RootView: View {
                 ContentView()
                     .environmentObject(state)
                     .environmentObject(api)
+                    .task(id: api.isAuthenticated) {
+                        AppStateAccess.current = state
+                        await state.reloadLibrary()
+                    }
             } else {
                 AuthView(api: api)
                     .environmentObject(state)

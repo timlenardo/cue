@@ -262,8 +262,34 @@ struct EntryView: View {
                 throw CueAPIError.server(status: 0, message: "Transcription ended without a result.")
             }
 
+            // Add to library so the user can return without re-pasting. We do
+            // this before loadLive so the player carries a serverEpisodeId and
+            // can sync progress on the first tick.
+            var serverEpisodeId: Int? = nil
+            do {
+                let item = try await api.upsertLibrary(
+                    episode: episode,
+                    show: resolved.show,
+                    source: resolved.source
+                )
+                serverEpisodeId = item.episode.id
+            } catch {
+                // Library save failing shouldn't block listening; we just won't
+                // sync progress for this session.
+                print("[Cue] library upsert failed: \(error)")
+            }
+
             state.loadPhase = .idle
-            state.loadLive(LiveEpisode(show: resolved.show, episode: episode, transcript: transcript))
+            state.loadLive(
+                LiveEpisode(
+                    show: resolved.show,
+                    episode: episode,
+                    transcript: transcript,
+                    serverEpisodeId: serverEpisodeId
+                )
+            )
+            // Refresh library so the just-added episode is in the list.
+            await state.reloadLibrary()
         } catch {
             state.loadPhase = .error(error.localizedDescription)
         }

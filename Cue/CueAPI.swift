@@ -62,6 +62,35 @@ struct TranscribeResponse: Codable {
     let durationSeconds: Double?
 }
 
+/// One episode in a user's library, including the resolved metadata.
+struct ServerEpisode: Codable, Equatable {
+    let id: Int
+    let audioUrl: String
+    let source: String
+    let showTitle: String
+    let showAuthor: String?
+    let showFeedUrl: String?
+    let showArtworkUrl: String?
+    let episodeTitle: String
+    let episodeGuid: String?
+    let episodePubDate: String?
+    let episodeDescription: String?
+    let durationSeconds: Double?
+}
+
+struct LibraryItem: Codable, Identifiable, Equatable {
+    let id: Int
+    let addedAt: String
+    let lastPlayedAt: String?
+    let completedAt: String?
+    let positionSeconds: Double
+    let episode: ServerEpisode
+}
+
+private struct LibraryListResponse: Codable {
+    let items: [LibraryItem]
+}
+
 /// Streaming event emitted by `/v1/podcasts/transcribe` (NDJSON).
 enum TranscribeEvent {
     /// Server-side stage label.
@@ -219,6 +248,42 @@ final class CueAPI: ObservableObject {
         }
     }
 
+    // MARK: - Library
+
+    func getLibrary() async throws -> [LibraryItem] {
+        let resp: LibraryListResponse = try await get("/v1/library")
+        return resp.items
+    }
+
+    func upsertLibrary(episode: ResolvedEpisode, show: ResolvedShow, source: String) async throws -> LibraryItem {
+        let body: [String: Any] = [
+            "audioUrl": episode.audioUrl,
+            "source": source,
+            "showTitle": show.title,
+            "showAuthor": show.author as Any,
+            "showFeedUrl": show.feedUrl as Any,
+            "showArtworkUrl": show.artworkUrl as Any,
+            "episodeTitle": episode.title,
+            "episodeGuid": episode.guid,
+            "episodePubDate": episode.pubDate as Any,
+            "episodeDescription": episode.description as Any,
+            "durationSeconds": episode.durationSeconds as Any,
+        ].compactMapValues { v in
+            if v is NSNull { return nil }
+            return v
+        }
+        return try await postRaw("/v1/library", body: body)
+    }
+
+    func updateProgress(episodeId: Int, positionSeconds: Double) async throws -> LibraryItem {
+        return try await patchRaw("/v1/library/\(episodeId)/progress", body: ["positionSeconds": positionSeconds])
+    }
+
+    func removeFromLibrary(episodeId: Int) async throws {
+        struct Empty: Decodable { let success: Bool }
+        let _: Empty = try await delete("/v1/library/\(episodeId)")
+    }
+
     // MARK: - Request helpers
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
@@ -233,6 +298,15 @@ final class CueAPI: ObservableObject {
     private func postRaw<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
         let data = try JSONSerialization.data(withJSONObject: body)
         return try await send(path: path, method: "POST", bodyData: data)
+    }
+
+    private func patchRaw<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+        let data = try JSONSerialization.data(withJSONObject: body)
+        return try await send(path: path, method: "PATCH", bodyData: data)
+    }
+
+    private func delete<T: Decodable>(_ path: String) async throws -> T {
+        try await send(path: path, method: "DELETE", bodyData: nil)
     }
 
     private func send<T: Decodable>(path: String, method: String, bodyData: Data?) async throws -> T {

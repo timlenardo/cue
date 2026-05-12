@@ -7,88 +7,138 @@ struct LibraryView: View {
         let palette = state.palette
 
         VStack(alignment: .leading, spacing: 0) {
-            // Title row
             HStack(alignment: .center) {
                 Text("Library")
                     .font(Fonts.serif(28, weight: .medium))
                     .tracking(-0.5)
                     .foregroundStyle(palette.ink)
                 Spacer()
-                CircleIconButton(palette: palette, system: "line.3.horizontal") {}
+                CircleIconButton(palette: palette, system: "arrow.clockwise") {
+                    Task { await state.reloadLibrary() }
+                }
             }
             .padding(.horizontal, 22)
             .padding(.top, 8)
 
-            // Body scroll
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
-                    NowPlayingCard(ep: SampleData.nowPlaying)
+            if state.library.isEmpty {
+                emptyState
+            } else {
+                listBody
+            }
+        }
+        .padding(.top, Geo.statusBarReserve)
+        .padding(.bottom, Geo.tabBarHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(palette.bg.ignoresSafeArea())
+    }
+
+    // MARK: - Empty state
+
+    private var emptyState: some View {
+        let palette = state.palette
+        return VStack {
+            Spacer()
+            VStack(spacing: 10) {
+                Image(systemName: "headphones")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundStyle(palette.inkFade)
+                Text("No episodes yet.")
+                    .font(Fonts.serif(18, weight: .medium))
+                    .tracking(-0.2)
+                    .foregroundStyle(palette.inkMuted)
+                Text("Paste a podcast link on the Listen tab. Episodes you start will show up here.")
+                    .font(Fonts.sans(13))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+                    .foregroundStyle(palette.inkFade)
+                    .padding(.horizontal, 40)
+            }
+            .frame(maxWidth: .infinity)
+            Spacer()
+        }
+    }
+
+    // MARK: - List
+
+    private var listBody: some View {
+        let items = state.library
+        let hero = items.first
+        let rest = Array(items.dropFirst())
+
+        return ScrollView(showsIndicators: false) {
+            VStack(spacing: 0) {
+                if let hero {
+                    NowPlayingCard(item: hero)
                         .padding(.bottom, 4)
+                }
 
-                    SectionLabel(label: "Up next", count: SampleData.queue.count, action: "Edit")
-
+                if !rest.isEmpty {
+                    SectionLabel(label: "Up next", count: rest.count)
                     VStack(spacing: 0) {
-                        ForEach(Array(SampleData.queue.enumerated()), id: \.element.id) { idx, ep in
-                            EpisodeRow(ep: ep)
-                            if idx < SampleData.queue.count - 1 { Separator() }
-                        }
-                    }
-                    .padding(.horizontal, 6)
-
-                    SectionLabel(label: "Recently played", count: nil, action: "See all")
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(SampleData.history.enumerated()), id: \.element.id) { idx, ep in
-                            EpisodeRow(ep: ep)
-                            if idx < SampleData.history.count - 1 { Separator() }
+                        ForEach(Array(rest.enumerated()), id: \.element.id) { idx, item in
+                            EpisodeRow(item: item)
+                            if idx < rest.count - 1 { Separator() }
                         }
                     }
                     .padding(.horizontal, 6)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 20)
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 24)
         }
-        .padding(.top, Geo.statusBarReserve)
-        .padding(.bottom, Geo.bottomDock)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(palette.bg.ignoresSafeArea())
+        .refreshable {
+            await state.reloadLibrary()
+        }
     }
 }
 
-// MARK: - Now Playing hero
+// MARK: - Now-playing hero
 
 private struct NowPlayingCard: View {
     @EnvironmentObject var state: AppState
-    let ep: Episode
+    let item: LibraryItem
 
     var body: some View {
         let palette = state.palette
-        let show = SampleData.show(ep.showKey)
-        let remaining = ep.duration * (1 - ep.progress)
+        let ep = item.episode
+        let progress = ep.durationSeconds.map { item.positionSeconds / max(1, $0) } ?? 0
+        let remaining = (ep.durationSeconds ?? 0) - item.positionSeconds
+        let inProgress = item.positionSeconds > 0 && item.completedAt == nil
+
+        let subline: String = {
+            if ep.durationSeconds != nil && inProgress {
+                return "\(ep.showTitle) · \(Format.duration(remaining)) left"
+            }
+            if let total = ep.durationSeconds {
+                return "\(ep.showTitle) · \(Format.duration(total))"
+            }
+            return ep.showTitle
+        }()
 
         Button {
-            state.openPlayer()
+            Task { await state.openFromLibrary(item) }
         } label: {
             HStack(spacing: 14) {
-                CoverTile(showKey: ep.showKey, size: 72, radius: 14)
+                ShowMonogram(text: ep.showTitle, size: 72, radius: 14)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("NOW PLAYING")
+                    Text(inProgress ? "RESUME" : (item.completedAt != nil ? "PLAYED" : "READY TO PLAY"))
                         .font(Fonts.sans(10.5, weight: .bold))
                         .tracking(1)
                         .foregroundStyle(palette.accent)
-                    Text(ep.title)
+                    Text(ep.episodeTitle)
                         .font(Fonts.serif(17, weight: .medium))
                         .tracking(-0.2)
                         .lineSpacing(2)
                         .foregroundStyle(palette.ink)
                         .multilineTextAlignment(.leading)
-                    Text("\(show.name) · \(Format.duration(remaining)) left")
+                        .lineLimit(2)
+                    Text(subline)
                         .font(Fonts.sans(11.5))
                         .foregroundStyle(palette.inkMuted)
                         .padding(.top, 1)
+                        .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -108,9 +158,29 @@ private struct NowPlayingCard: View {
                             .strokeBorder(palette.cardEdge, lineWidth: 0.5)
                     )
             )
-            .shadow(color: show.color.opacity(0.5), radius: 18, y: 12)
+            .overlay(alignment: .bottom) {
+                if inProgress, ep.durationSeconds != nil {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(palette.subtleStrong)
+                            Capsule().fill(palette.accent)
+                                .frame(width: proxy.size.width * CGFloat(min(1, progress)))
+                        }
+                    }
+                    .frame(height: 3)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 6)
+                }
+            }
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) {
+                Task { await state.removeFromLibrary(episodeId: ep.id) }
+            } label: {
+                Label("Remove from library", systemImage: "trash")
+            }
+        }
     }
 }
 
@@ -120,7 +190,6 @@ private struct SectionLabel: View {
     @EnvironmentObject var state: AppState
     let label: String
     let count: Int?
-    let action: String?
 
     var body: some View {
         let palette = state.palette
@@ -138,11 +207,6 @@ private struct SectionLabel: View {
                 }
             }
             Spacer()
-            if let action {
-                Button(action) {}
-                    .font(Fonts.sans(12, weight: .semibold))
-                    .foregroundStyle(palette.accent)
-            }
         }
         .padding(.horizontal, 6)
         .padding(.top, 20)
@@ -152,35 +216,38 @@ private struct SectionLabel: View {
 
 // MARK: - Episode row
 
-struct EpisodeRow: View {
+private struct EpisodeRow: View {
     @EnvironmentObject var state: AppState
-    let ep: Episode
+    let item: LibraryItem
 
     var body: some View {
         let palette = state.palette
-        let show = SampleData.show(ep.showKey)
-        let remaining = ep.duration * (1 - ep.progress)
-        let done = ep.progress >= 0.99
+        let ep = item.episode
+        let inProgress = item.positionSeconds > 0 && item.completedAt == nil
+        let progress = ep.durationSeconds.map { item.positionSeconds / max(1, $0) } ?? 0
+        let remaining = (ep.durationSeconds ?? 0) - item.positionSeconds
+        let done = item.completedAt != nil
 
         Button {
-            state.openPlayer()
+            Task { await state.openFromLibrary(item) }
         } label: {
             HStack(spacing: 12) {
-                CoverTile(showKey: ep.showKey, size: 52, radius: 10)
+                ShowMonogram(text: ep.showTitle, size: 52, radius: 10)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("\(show.name) · \(ep.dateLabel)")
+                    Text(ep.showTitle)
                         .font(Fonts.sans(11, weight: .semibold))
                         .tracking(0.2)
                         .foregroundStyle(palette.inkMuted)
-                    Text(ep.title)
+                        .lineLimit(1)
+                    Text(ep.episodeTitle)
                         .font(Fonts.sans(14.5, weight: .medium))
                         .tracking(-0.15)
                         .foregroundStyle(palette.ink)
                         .lineLimit(1)
                     HStack(spacing: 8) {
-                        if ep.progress > 0 && ep.progress < 0.99 {
-                            ProgressBarMini(progress: ep.progress, accent: palette.accent)
+                        if inProgress {
+                            ProgressBarMini(progress: progress, accent: palette.accent)
                             Text("\(Format.duration(remaining)) left")
                                 .font(Fonts.sans(11))
                                 .monospacedDigit()
@@ -194,10 +261,14 @@ struct EpisodeRow: View {
                                     .font(Fonts.sans(11))
                                     .foregroundStyle(palette.inkMuted)
                             }
-                        } else {
-                            Text(Format.duration(ep.duration))
+                        } else if let dur = ep.durationSeconds {
+                            Text(Format.duration(dur))
                                 .font(Fonts.sans(11))
                                 .monospacedDigit()
+                                .foregroundStyle(palette.inkSoft)
+                        } else {
+                            Text("Ready")
+                                .font(Fonts.sans(11))
                                 .foregroundStyle(palette.inkSoft)
                         }
                         Spacer(minLength: 0)
@@ -210,8 +281,70 @@ struct EpisodeRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) {
+                Task { await state.removeFromLibrary(episodeId: ep.id) }
+            } label: {
+                Label("Remove from library", systemImage: "trash")
+            }
+        }
     }
 }
+
+// MARK: - Generic show monogram (no SampleData dependency)
+
+private struct ShowMonogram: View {
+    let text: String
+    let size: CGFloat
+    let radius: CGFloat
+
+    private var monogram: String {
+        let words = text
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .filter { !$0.isEmpty }
+        if let first = words.first?.first {
+            if words.count >= 2, let second = words.dropFirst().first?.first {
+                return "\(first)\(second)".uppercased()
+            }
+            return "\(first)".uppercased()
+        }
+        return "?"
+    }
+
+    /// Deterministic dark color from the show-title hash.
+    private var color: Color {
+        var h: UInt64 = 1469598103934665603
+        for byte in text.utf8 {
+            h ^= UInt64(byte)
+            h = h &* 1099511628211
+        }
+        let hue = Double(h % 360) / 360.0
+        return Color(hue: hue, saturation: 0.45, brightness: 0.32)
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [color, color.opacity(0.85)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Text(monogram)
+                .font(Fonts.serif(size * 0.36, weight: .semibold))
+                .tracking(-0.5)
+                .foregroundStyle(.white)
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
+    }
+}
+
+// MARK: - Helpers
 
 private struct ProgressBarMini: View {
     @EnvironmentObject var state: AppState
@@ -224,7 +357,7 @@ private struct ProgressBarMini: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(palette.subtleStrong)
                 Capsule().fill(accent)
-                    .frame(width: proxy.size.width * CGFloat(min(1, progress)))
+                    .frame(width: proxy.size.width * CGFloat(min(1, max(0, progress))))
             }
         }
         .frame(height: 3)
@@ -240,8 +373,6 @@ private struct Separator: View {
             .padding(.leading, 64)
     }
 }
-
-// MARK: - Shared circle icon button
 
 struct CircleIconButton: View {
     let palette: Palette

@@ -14,7 +14,7 @@ struct ContentView: View {
             Group {
                 switch state.tab {
                 case .listen:  EntryView()
-                case .library: ComingSoonView(title: "Library")
+                case .library: LibraryView()
                 case .notes:   ComingSoonView(title: "Notes")
                 }
             }

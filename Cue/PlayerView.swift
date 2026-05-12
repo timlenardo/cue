@@ -50,7 +50,7 @@ private struct PlayerHeader: View {
         let palette = state.palette
 
         HStack(spacing: 12) {
-            Button { state.minimizePlayer() } label: {
+            Button { state.minimizePlayerAndSync() } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(palette.inkMuted)
