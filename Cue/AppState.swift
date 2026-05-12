@@ -28,6 +28,10 @@ final class AppState: ObservableObject {
     @Published var playerOpen: Bool = false
     @Published var voiceOpen: Bool = false
 
+    /// True while the wake-word engine is listening. Drives any UI affordance
+    /// (e.g. a "listening" indicator on the mic button).
+    @Published private(set) var wakeArmed: Bool = false
+
     @Published var currentTime: Double = 0
     @Published var playing: Bool = false
     @Published var speedIdx: Int = AppState.loadSpeedIdx() {
@@ -61,6 +65,13 @@ final class AppState: ObservableObject {
     @Published var voiceSession: RealtimeVoiceSession?
 
     let audio = AudioPlayer()
+    let wake = WakeWordEngine()
+    /// Mirrors the scene phase so updateWakeArmed() knows whether to listen.
+    /// RootView pushes updates via sceneDidChange(active:).
+    private var scenePhaseActive: Bool = true
+    /// Edge tracker — true iff we currently hold a MicCapture ref for the
+    /// wake engine. Used to issue exactly one start()/stop() per transition.
+    private var micArmedForWake: Bool = false
     private var audioSubs: Set<AnyCancellable> = []
     private var progressSyncTimer: AnyCancellable?
     private var lastSyncedPosition: Double = -1
@@ -97,6 +108,8 @@ final class AppState: ObservableObject {
             diag.tick(frames: Int(buffer.frameLength), sampleRate: buffer.format.sampleRate)
         }
         #endif
+
+        wake.onDetect = { [weak self] in self?.openMic() }
 
         // Mirror AudioPlayer's time + playing state into AppState's @Published
         // properties so transcript/progress views update reactively.
@@ -144,28 +157,43 @@ final class AppState: ObservableObject {
                     playing: p,
                     duration: self.totalDuration
                 )
-                // Mic capture follows playback: on while a podcast is playing,
-                // off when paused. This is what gives the wake-word listener
-                // a stream of audio buffers to scan exactly when it's useful.
-                Task { @MainActor in await self.syncMicToPlayback(playing: p) }
             }
             .store(in: &audioSubs)
     }
 
-    /// Bring MicCapture in line with the current playback state. Requests
-    /// permission lazily the first time we'd start the mic.
-    private func syncMicToPlayback(playing: Bool) async {
-        guard live != nil else {
-            MicCapture.shared.stop(force: true)
-            return
-        }
-        if playing {
-            if MicCapture.shared.currentPermission() == .undetermined {
-                await MicCapture.shared.requestPermission()
+    // MARK: - Wake-word arming
+    //
+    // The wake engine listens whenever the full PlayerView is on screen with
+    // an episode loaded and the voice agent isn't already up — regardless of
+    // play/pause. Scene phase is mirrored from RootView.
+
+    /// Called by RootView on scene-phase transitions.
+    func sceneDidChange(active: Bool) {
+        scenePhaseActive = active
+        updateWakeArmed()
+    }
+
+    /// Recompute whether the wake engine should be listening and reconcile
+    /// MicCapture + WakeWordEngine to that state. Idempotent.
+    private func updateWakeArmed() {
+        let shouldArm = live != nil && playerOpen && !voiceOpen && scenePhaseActive
+        guard shouldArm != micArmedForWake else { return }
+        micArmedForWake = shouldArm
+        wakeArmed = shouldArm
+
+        if shouldArm {
+            Task { @MainActor in
+                if MicCapture.shared.currentPermission() == .undetermined {
+                    await MicCapture.shared.requestPermission()
+                }
+                // Re-check — we may have been disarmed during the await.
+                guard self.micArmedForWake else { return }
+                MicCapture.shared.start()
+                self.wake.start()
             }
-            MicCapture.shared.start()
         } else {
-            MicCapture.shared.stop(force: true)
+            wake.stop()
+            MicCapture.shared.stop()
         }
     }
 
@@ -221,13 +249,22 @@ final class AppState: ObservableObject {
         if live != nil, audio.isPlaying { audio.setRate(Float(speed)) }
     }
 
-    func openPlayer()     { withAnimation(.easeOut(duration: 0.28)) { playerOpen = true } }
-    func minimizePlayer() { withAnimation(.easeOut(duration: 0.28)) { playerOpen = false } }
+    func openPlayer() {
+        withAnimation(.easeOut(duration: 0.28)) { playerOpen = true }
+        updateWakeArmed()
+    }
+    func minimizePlayer() {
+        withAnimation(.easeOut(duration: 0.28)) { playerOpen = false }
+        updateWakeArmed()
+    }
 
     func openMic() {
         withAnimation(.easeOut(duration: 0.32)) { voiceOpen = true }
         // Pause podcast while the agent is open.
         if live != nil { audio.pause() }
+        // Hand the mic off to the realtime session — wake should not keep
+        // tapping the input bus while the agent is on screen.
+        updateWakeArmed()
 
         // Spin up a real OpenAI Realtime session whenever we have a live
         // episode. Without `live` there's no audioUrl / transcript to mint
@@ -257,6 +294,12 @@ final class AppState: ObservableObject {
         withAnimation(.easeOut(duration: 0.25)) { voiceOpen = false }
         if live != nil { audio.play(); audio.setRate(Float(speed)) }
         else { playing = true }
+        // Re-arm wake after a brief delay so the tail of the realtime
+        // session's TTS audio doesn't immediately re-trigger.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            self.updateWakeArmed()
+        }
     }
 
     /// AVPlayer's currentTime when live; falls back to the simulated
@@ -428,7 +471,6 @@ final class AppState: ObservableObject {
         currentTime = 0
         NowPlayingCenter.shared.clear()
         LiveActivityController.shared.end()
-        MicCapture.shared.stop(force: true)
         minimizePlayer()
     }
 

@@ -2,56 +2,85 @@
 import AVFoundation
 import Foundation
 import OSLog
+import WhisperKit
 
-/// On-device wake-word detector for "Hey Cue", powered by sherpa-onnx's
-/// streaming keyword spotter (KWS Zipformer). Consumes raw mic buffers
-/// from `MicCapture.shared` so the input bus is shared cleanly with the
-/// rest of the app — MicCapture owns the AVAudioEngine + tap, we just
-/// register a buffer handler and feed samples to the spotter.
+/// On-device wake-word detector backed by WhisperKit (rolling-window
+/// Whisper inference + regex match). `AppState` consumes the engine
+/// through `start() / stop() / onDetect` and doesn't care what's
+/// underneath.
+///
+/// **How it works**
+/// - Subscribes to `MicCapture.shared` for raw input buffers.
+/// - Resamples each buffer to 16 kHz mono float and appends to a rolling
+///   ~2s ring (only the most recent samples are kept).
+/// - Every ~600 ms, the rolling window is handed to a Whisper tiny.en
+///   transcription. Each transcript is logged ("whisper: …") regardless
+///   of trigger match, so you can see exactly what the mic is hearing.
+/// - If the transcript matches any trigger regex (case-insensitive,
+///   word-boundary), `onDetect` fires on the main actor.
+///
+/// **Model**
+/// - "openai_whisper-tiny.en" — ~39 M params, ~75 MB on disk. Auto-
+///   downloaded from HuggingFace on first launch and cached locally.
 final class WakeWordEngine: @unchecked Sendable {
 
     /// Fires whenever the wake phrase is recognised (already on @MainActor).
-    /// Reassign or clear by setting to nil. Debounced by `Debounce` seconds.
+    /// Debounced by `Debounce` seconds.
     var onDetect: (@MainActor () -> Void)?
 
-    enum State { case idle, listening, denied, failed(String) }
+    enum State { case idle, loading, listening, denied, failed(String) }
     private(set) var state: State = .idle
 
     // MARK: - Tunables
-    private static let Debounce: TimeInterval = 1.5
     private static let TargetSampleRate: Double = 16_000
-    private static let FeatureDim: Int = 80
+    private static let WindowSeconds: Double = 2.0
+    private static let WindowSamples: Int = Int(16_000 * 2)
+    /// Minimum gap between Whisper inferences. Smaller = more responsive
+    /// but more CPU; ~600 ms is comfortable on iPhone Neural Engine.
+    private static let InferenceIntervalMs: Int = 600
+    private static let Debounce: TimeInterval = 1.5
+    /// English-only tiny model. Smallest viable Whisper for wake-word.
+    private static let ModelName = "openai_whisper-tiny.en"
 
-    // MARK: - Inference
-    private let queue = DispatchQueue(label: "cue.wake.kws", qos: .userInitiated)
-    private var spotter: SherpaOnnxKeywordSpotterWrapper?
+    /// Triggers we accept. Word-boundary, case-insensitive. Add more
+    /// aliases here as you hear false-negatives in the logs.
+    private static let TriggerPattern = #"\b(qq|q\s*q|cue\s*cue|queue\s*queue|kew\s*kew|coo\s*coo|hey\s+cue|hey\s+q(ueue|ew|u)?)\b"#
+
+    // MARK: - State
+    private let triggerRegex: NSRegularExpression = {
+        // The pattern is a literal — force-try is fine.
+        try! NSRegularExpression(pattern: WakeWordEngine.TriggerPattern, options: [.caseInsensitive])
+    }()
+    private var pipeline: WhisperKit?
     private var lastFireAt: Date = .distantPast
+    private let stateLock = NSLock()
+    private var lastInferenceAt: Date = .distantPast
+    private var inferenceInFlight: Bool = false
 
-    // MARK: - Converter (built lazily once we see the first buffer)
+    // Rolling 16 kHz mono buffer.
+    private let bufLock = NSLock()
+    private var rolling: [Float] = []
+
+    // Mic subscription / resampler.
+    private var bufferToken: UUID?
     private let convertLock = NSLock()
     private var converter: AVAudioConverter?
     private var sourceFormat: AVAudioFormat?
     private var targetFormat: AVAudioFormat?
 
-    // MARK: - Mic subscription
-    private var bufferToken: UUID?
-
     private let log = Logger(subsystem: "app.cue", category: "wake")
 
     // MARK: - Public lifecycle
 
-    /// Register a handler on `MicCapture.shared`. Idempotent. The mic
-    /// itself is started/stopped by AppState based on playback — we just
-    /// listen to whatever it delivers.
     @MainActor
     func start() {
         guard bufferToken == nil else { return }
-        queue.async { [weak self] in self?.bootIfNeeded() }
+        loadPipelineIfNeeded()
         bufferToken = MicCapture.shared.addBufferHandler { [weak self] buffer, _ in
             self?.handle(buffer: buffer)
         }
         state = .listening
-        log.info("wake handler registered")
+        log.info("whisper wake handler registered")
     }
 
     @MainActor
@@ -60,61 +89,143 @@ final class WakeWordEngine: @unchecked Sendable {
             MicCapture.shared.removeBufferHandler(token)
             bufferToken = nil
         }
+        bufLock.lock()
+        rolling.removeAll(keepingCapacity: true)
+        bufLock.unlock()
+        stateLock.lock()
+        lastInferenceAt = .distantPast
+        stateLock.unlock()
         if case .listening = state { state = .idle }
-        log.info("wake handler unregistered")
+        log.info("whisper wake handler unregistered")
     }
 
-    // MARK: - Internals
+    // MARK: - Pipeline boot
 
-    private func bootIfNeeded() {
-        guard spotter == nil else { return }
+    @MainActor
+    private func loadPipelineIfNeeded() {
+        guard pipeline == nil else { return }
+        if case .loading = state { return }
+        state = .loading
+        log.info("whisper loading model: \(Self.ModelName, privacy: .public)")
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let config = WhisperKitConfig(model: Self.ModelName)
+                let pipe = try await WhisperKit(config)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.pipeline = pipe
+                    if self.bufferToken != nil {
+                        self.state = .listening
+                    } else {
+                        self.state = .idle
+                    }
+                    self.log.info("whisper model ready")
+                }
+            } catch {
+                let msg = error.localizedDescription
+                await MainActor.run {
+                    self?.state = .failed(msg)
+                    self?.log.error("whisper model load failed: \(msg, privacy: .public)")
+                }
+            }
+        }
+    }
 
-        guard
-            let encoder = bundleURL("encoder.int8", ext: "onnx"),
-            let decoder = bundleURL("decoder.int8", ext: "onnx"),
-            let joiner  = bundleURL("joiner.int8",  ext: "onnx"),
-            let tokens  = bundleURL("tokens",       ext: "txt"),
-            let bpe     = bundleURL("bpe",          ext: "model"),
-            let kw      = Bundle.main.url(forResource: "keywords", withExtension: "txt")
-        else {
-            let missing = "kws model resources not found in bundle"
-            log.error("\(missing)")
-            DispatchQueue.main.async { self.state = .failed(missing) }
+    // MARK: - Audio path (audio render thread)
+
+    private func handle(buffer: AVAudioPCMBuffer) {
+        let samples = resample(buffer: buffer)
+        guard !samples.isEmpty else { return }
+
+        bufLock.lock()
+        rolling.append(contentsOf: samples)
+        if rolling.count > Self.WindowSamples {
+            rolling.removeFirst(rolling.count - Self.WindowSamples)
+        }
+        // Snapshot under the lock; release immediately so we don't block
+        // the audio thread while inference runs.
+        let snapshot = rolling
+        bufLock.unlock()
+
+        // Only run inference once we've accumulated at least ~700 ms of
+        // audio — anything shorter is too noisy for Whisper.
+        guard snapshot.count >= Int(Self.TargetSampleRate * 0.7) else { return }
+
+        // Throttle inference cadence + single-in-flight gate.
+        let now = Date()
+        stateLock.lock()
+        let dueMs = now.timeIntervalSince(lastInferenceAt) * 1000
+        if dueMs < Double(Self.InferenceIntervalMs) || inferenceInFlight {
+            stateLock.unlock()
             return
         }
+        guard let pipe = pipeline else {
+            stateLock.unlock()
+            return
+        }
+        lastInferenceAt = now
+        inferenceInFlight = true
+        stateLock.unlock()
 
-        let transducer = sherpaOnnxOnlineTransducerModelConfig(
-            encoder: encoder.path,
-            decoder: decoder.path,
-            joiner:  joiner.path
-        )
-        let model = sherpaOnnxOnlineModelConfig(
-            tokens: tokens.path,
-            transducer: transducer,
-            numThreads: 1,
-            provider: "cpu",
-            debug: 0,
-            modelType: "",
-            modelingUnit: "bpe",
-            bpeVocab: bpe.path
-        )
-        let feat = sherpaOnnxFeatureConfig(
-            sampleRate: Int(Self.TargetSampleRate),
-            featureDim: Self.FeatureDim
-        )
-        var config = sherpaOnnxKeywordSpotterConfig(
-            featConfig: feat,
-            modelConfig: model,
-            keywordsFile: kw.path,
-            keywordsScore: 1.5,
-            keywordsThreshold: 0.25
-        )
-        spotter = withUnsafePointer(to: &config) { SherpaOnnxKeywordSpotterWrapper(config: $0) }
-        log.info("kws spotter ready")
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.runInference(pipe: pipe, samples: snapshot)
+            self?.stateLock.lock()
+            self?.inferenceInFlight = false
+            self?.stateLock.unlock()
+        }
     }
 
-    /// Called on MicCapture's handler thread (AVAudioEngine input thread).
-    private func handle(buffer: AVAudioPCMBuffer) {
+    private func runInference(pipe: WhisperKit, samples: [Float]) async {
+        do {
+            let opts = DecodingOptions(
+                verbose: false,
+                task: .transcribe,
+                language: "en",
+                temperature: 0,
+                sampleLength: 224,
+                usePrefillPrompt: false,
+                skipSpecialTokens: true,
+                withoutTimestamps: true
+            )
+            let results = try await pipe.transcribe(audioArray: samples, decodeOptions: opts)
+            let text = results
+                .map { $0.text }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            await MainActor.run { self.handleTranscript(text) }
+        } catch {
+            let msg = error.localizedDescription
+            log.error("whisper transcribe failed: \(msg, privacy: .public)")
+        }
+    }
+
+    @MainActor
+    private func handleTranscript(_ text: String) {
+        // Always log the decoded text so dev can see what the mic
+        // is picking up. Whisper emits "(silence)" / "[BLANK_AUDIO]" /
+        // empty when nothing speech-like was heard — leave those alone.
+        if text.isEmpty {
+            log.info("whisper: (empty)")
+        } else {
+            log.info("whisper: '\(text, privacy: .public)'")
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        guard triggerRegex.firstMatch(in: text, options: [], range: range) != nil else { return }
+
+        let now = Date()
+        if now.timeIntervalSince(lastFireAt) < Self.Debounce {
+            log.info("whisper hit (debounced): '\(text, privacy: .public)'")
+            return
+        }
+        lastFireAt = now
+        log.info("whisper hit: '\(text, privacy: .public)'")
+        onDetect?()
+    }
+
+    // MARK: - Resampler (audio render thread)
+
+    private func resample(buffer: AVAudioPCMBuffer) -> [Float] {
         let bufFormat = buffer.format
         convertLock.lock()
         if sourceFormat?.sampleRate != bufFormat.sampleRate
@@ -126,24 +237,23 @@ final class WakeWordEngine: @unchecked Sendable {
                 interleaved: false
             ) else {
                 convertLock.unlock()
-                return
+                return []
             }
             sourceFormat = bufFormat
             targetFormat = target
             converter = AVAudioConverter(from: bufFormat, to: target)
-            log.info("wake converter ready: \(bufFormat.sampleRate, format: .fixed(precision: 0))Hz x \(bufFormat.channelCount)ch -> 16kHz mono")
+            log.info("whisper converter ready: \(bufFormat.sampleRate, format: .fixed(precision: 0))Hz x \(bufFormat.channelCount)ch -> 16kHz mono")
         }
         guard let converter, let target = targetFormat else {
             convertLock.unlock()
-            return
+            return []
         }
         convertLock.unlock()
 
         let outCapacity = AVAudioFrameCount(
             Double(buffer.frameLength) * target.sampleRate / bufFormat.sampleRate + 64
         )
-        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
-
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return [] }
         var error: NSError?
         var fed = false
         let status = converter.convert(to: out, error: &error) { _, status in
@@ -152,42 +262,11 @@ final class WakeWordEngine: @unchecked Sendable {
             status.pointee = .haveData
             return buffer
         }
-
         guard status != .error, let channelData = out.floatChannelData?[0] else {
-            if let error { log.error("convert: \(error.localizedDescription)") }
-            return
+            if let error { log.error("convert: \(error.localizedDescription, privacy: .public)") }
+            return []
         }
-
-        let samples = Array(UnsafeBufferPointer(start: channelData, count: Int(out.frameLength)))
-        queue.async { [weak self] in self?.feed(samples: samples) }
-    }
-
-    private func feed(samples: [Float]) {
-        guard let spotter else { return }
-        spotter.acceptWaveform(samples: samples, sampleRate: Int(Self.TargetSampleRate))
-        while spotter.isReady() { spotter.decode() }
-
-        let result = spotter.getResult()
-        let hit = result.keyword
-        guard !hit.isEmpty else { return }
-
-        // Reset the stream so the same phrase doesn't re-match from
-        // residual internal state.
-        spotter.reset()
-
-        let now = Date()
-        if now.timeIntervalSince(lastFireAt) < Self.Debounce { return }
-        lastFireAt = now
-
-        log.info("wake hit: \(hit)")
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.onDetect?() }
-        }
-    }
-
-    private func bundleURL(_ name: String, ext: String) -> URL? {
-        Bundle.main.url(forResource: name, withExtension: ext, subdirectory: "kws-model")
-            ?? Bundle.main.url(forResource: name, withExtension: ext)
+        return Array(UnsafeBufferPointer(start: channelData, count: Int(out.frameLength)))
     }
 }
 #endif

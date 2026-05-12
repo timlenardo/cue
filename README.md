@@ -2,7 +2,8 @@
 
 This branch (`ios-voice-realtime`) replaces the simulated `VoiceAgentView`
 with a real OpenAI Realtime voice loop over WebRTC. It builds on the
-wake-word (`Hey Cue`) integration that was already WIP on `main`.
+on-device wake-word integration (say "QQ" or "Cue Cue" to open the
+voice agent) that was already WIP on `main`.
 
 ## What this branch adds
 
@@ -45,21 +46,7 @@ This is the only manual Xcode step required for the build to succeed. The Swift 
 
 Verify: in the Project Navigator, expand `Cue → Frameworks, Libraries, and Embedded Content`. You should see `WebRTC` listed with embed type `Do Not Embed` (default for binary xcframeworks). If you see it under "Package Dependencies" at the top of the navigator but NOT in the Cue target's frameworks list, click **+** under "Frameworks, Libraries, and Embedded Content" and add it.
 
-### 3. Build the on-device wake-word frameworks (if `vendor/` is empty)
-
-The `vendor/` directory holds `sherpa-onnx.xcframework` and
-`onnxruntime.xcframework`. Binary artifacts are gitignored, so if you
-came from a clean clone (or your worktree's `vendor/` is empty), run:
-
-```sh
-cd /Users/douglasqian/ios-voice-realtime
-bash vendor/bootstrap.sh
-```
-
-(If you already had these locally from `main`, they were rsynced into the
-worktree when this branch was set up — you can skip this.)
-
-### 4. Configure signing for your Apple ID
+### 3. Configure signing for your Apple ID
 
 1. Select the **Cue** project in the navigator → **Cue** target → **Signing & Capabilities** tab.
 2. **Team**: pick your personal team (the one tied to your Apple ID).
@@ -98,7 +85,7 @@ You'll be hitting the deployed `cue-dev` Heroku app, so the phone needs internet
 ### Talk to it
 There are two ways to start a session:
 - **Tap the mic button** (next to play/pause in the player UI), OR
-- **Say "Hey Cue"** out loud — the on-device wake word fires `AppState.openMic()` the same way.
+- **Say the wake phrase** out loud — current triggers are `qq`, `cue cue`, `queue queue`, `kew kew`, `hey cue`, `hey q[ueue]?`. On-device Whisper transcribes the mic continuously and fires `AppState.openMic()` on match. Extend the regex in `Cue/Wake/WakeWordEngine.swift` to add aliases.
 
 What you should see:
 1. Podcast pauses, voice agent sheet slides up.
@@ -122,42 +109,13 @@ What you should see:
 
 | Symptom | Likely cause / fix |
 |---|---|
-| Build fails with `no such module 'WebRTC'` | SwiftPM step (1.2) wasn't completed, or the WebRTC product isn't linked to the Cue target. Check Target → Frameworks. |
-| Build fails on `Cue/Wake/SherpaOnnx.swift` with missing C symbols | `vendor/sherpa-onnx.xcframework` is missing. Run `bash vendor/bootstrap.sh`. |
+| Build fails with `no such module 'WebRTC'` or `'WhisperKit'` | SwiftPM resolution didn't finish. File → Packages → Reset Package Caches, then Resolve Package Versions. Also confirm both products are linked to the Cue target (Target → General → Frameworks, Libraries, and Embedded Content). |
 | Phone refuses to launch app ("Untrusted Developer") | Settings → General → VPN & Device Management → trust your Apple ID. |
-| Wake word never fires | Check **Settings → Cue → Microphone** is on; check Console for `WakeWord` errors; some phones need the app foregrounded. |
+| Wake word never fires | Check **Settings → Cue → Microphone** is on; check Console for `wake` errors. First launch downloads the Whisper tiny.en model (~75 MB) from HuggingFace — needs internet once. |
 | Voice session stuck on "Connecting…" | Check Console for `RealtimeVoice` and `CueAPI` errors. Usual causes: phone offline, JWT expired (sign out + back in), or cue-dev down (try `curl https://cue-dev-7bd3eabd5817.herokuapp.com/v1/health/`). |
 | Voice session connects but you hear nothing | iOS audio session quirk — check the speaker isn't muted via the side switch, and make sure no other app held the mic. |
 | "Load an episode to talk" empty state | You hit the mic without loading a live episode (canned-sample mode). Paste a podcast URL on the home screen first. |
 | `404 No cached transcript for this audioUrl` from `/v1/voice/session` | The episode wasn't transcribed yet. Tap pause/replay flow to retrigger `/v1/podcasts/transcribe`, or pick an episode you've used before. |
 
-## Working with worktrees
-
-When using `bash /Users/douglasqian/multi-agent-harness/scripts/create-worktree.sh <repo> <slug>` to spin up a sibling worktree, two pieces of state are gitignored and therefore **don't** follow the new worktree automatically:
-
-- `vendor/sherpa-onnx.xcframework`
-- `vendor/onnxruntime.xcframework`
-
-Without these, `xcodebuild` fails with `There is no XCFramework found at '.../vendor/<name>.xcframework'`.
-
-After creating the worktree, hydrate `vendor/` one of two ways:
-
-```sh
-# Option A — copy from a sibling worktree that already has them:
-cp -R /Users/douglasqian/cue/vendor/onnxruntime.xcframework  /Users/douglasqian/<slug>/vendor/
-cp -R /Users/douglasqian/cue/vendor/sherpa-onnx.xcframework  /Users/douglasqian/<slug>/vendor/
-
-# Option B — re-download via the bootstrap script:
-bash /Users/douglasqian/<slug>/vendor/bootstrap.sh
-```
-
-Option A is instant; Option B re-fetches the ~80 MB archives. The KWS model files under `Cue/Wake/Resources/kws-model/` and the WebRTC SwiftPM package both follow the worktree on their own — only the two xcframeworks need to be hydrated.
-
-## How to commit your own changes here
-
-This branch already contains your previously-uncommitted wake-word WIP (committed as `Wake-word integration (sherpa-onnx KWS for "Hey Cue")`) plus the voice realtime work on top. When you're ready to land it:
-
-- If you want the wake-word change to land on `main` separately: cherry-pick the first commit (`git log --oneline ios-voice-realtime` → grab the SHA of the wake-word commit → `git cherry-pick <sha>` from your worktree on `main`), then open the voice PR against `main`.
-- Or just open one PR with both commits and squash-merge — the commit history tells the story.
 
 Branch name: `ios-voice-realtime`. Remote not yet pushed.

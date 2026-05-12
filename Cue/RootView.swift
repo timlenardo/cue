@@ -5,6 +5,7 @@ import AVFAudio
 struct RootView: View {
     @StateObject private var state = AppState()
     @StateObject private var api = CueAPI.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -23,6 +24,9 @@ struct RootView: View {
         }
         .preferredColorScheme(state.palette.statusDark ? .dark : .light)
         .task { await requestMicPermission() }
+        .onChange(of: scenePhase) { _, phase in
+            state.sceneDidChange(active: phase == .active)
+        }
     }
 
     /// Pre-request mic permission on launch so the first tap on the voice
