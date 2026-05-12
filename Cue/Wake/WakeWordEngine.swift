@@ -29,6 +29,10 @@ final class WakeWordEngine: @unchecked Sendable {
     #else
     private static let KeywordsThreshold: Float = 0.25
     #endif
+    /// When true, the spotter logs a per-second heartbeat (samples/s, RMS,
+    /// decode count). Useful when wake-word isn't firing and you want to
+    /// confirm audio is reaching the engine. Flip to false to silence.
+    private static let VerboseDiag: Bool = true
 
     // MARK: - Inference
     private let queue = DispatchQueue(label: "cue.wake.kws", qos: .userInitiated)
@@ -186,17 +190,19 @@ final class WakeWordEngine: @unchecked Sendable {
         spotter.acceptWaveform(samples: samples, sampleRate: Int(Self.TargetSampleRate))
 
         // Diagnostic accumulators: count samples and sum-of-squares for RMS.
-        diagSamplesFed += samples.count
-        var sumSq: Double = 0
-        for s in samples { sumSq += Double(s) * Double(s) }
-        diagSumSquares += sumSq
+        if Self.VerboseDiag {
+            diagSamplesFed += samples.count
+            var sumSq: Double = 0
+            for s in samples { sumSq += Double(s) * Double(s) }
+            diagSumSquares += sumSq
+        }
 
         var decodesThisCall = 0
         while spotter.isReady() {
             spotter.decode()
             decodesThisCall += 1
         }
-        diagDecodeCount += decodesThisCall
+        if Self.VerboseDiag { diagDecodeCount += decodesThisCall }
 
         let result = spotter.getResult()
         let hit = result.keyword
@@ -222,19 +228,21 @@ final class WakeWordEngine: @unchecked Sendable {
         // Heartbeat every ~1s: how much audio we've fed, its RMS (loudness
         // proxy), and how many decodes ran. Lets you watch the input live
         // and confirm the spotter is actually consuming it.
-        let now = Date()
-        let elapsed = now.timeIntervalSince(diagWindowStartedAt)
-        if elapsed >= 1.0 {
-            let sps = Int(Double(diagSamplesFed) / elapsed)
-            let rms: Double = diagSamplesFed > 0
-                ? (diagSumSquares / Double(diagSamplesFed)).squareRoot()
-                : 0
-            let rmsDb = rms > 0 ? 20 * log10(rms) : -120
-            log.info("wake heartbeat — \(sps) samples/s, RMS=\(rms, format: .fixed(precision: 4)) (\(rmsDb, format: .fixed(precision: 1)) dBFS), decodes=\(self.diagDecodeCount)")
-            diagWindowStartedAt = now
-            diagSamplesFed = 0
-            diagSumSquares = 0
-            diagDecodeCount = 0
+        if Self.VerboseDiag {
+            let now = Date()
+            let elapsed = now.timeIntervalSince(diagWindowStartedAt)
+            if elapsed >= 1.0 {
+                let sps = Int(Double(diagSamplesFed) / elapsed)
+                let rms: Double = diagSamplesFed > 0
+                    ? (diagSumSquares / Double(diagSamplesFed)).squareRoot()
+                    : 0
+                let rmsDb = rms > 0 ? 20 * log10(rms) : -120
+                log.info("wake heartbeat — \(sps) samples/s, RMS=\(rms, format: .fixed(precision: 4)) (\(rmsDb, format: .fixed(precision: 1)) dBFS), decodes=\(self.diagDecodeCount)")
+                diagWindowStartedAt = now
+                diagSamplesFed = 0
+                diagSumSquares = 0
+                diagDecodeCount = 0
+            }
         }
     }
 
