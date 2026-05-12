@@ -54,7 +54,7 @@ final class MicCapture {
     typealias BufferHandler = @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void
 
     private let engine = AVAudioEngine()
-    private var handlers: [UUID: BufferHandler] = [:]
+    private let handlerStore = BufferHandlerStore()
     private var interruptionObserver: Any?
     private var startCount: Int = 0   // simple ref count so multiple callers can request capture
 
@@ -87,16 +87,16 @@ final class MicCapture {
 
     // MARK: - Handlers
 
-    /// Register a handler. Returns a token used to unregister.
+    /// Register a handler. Returns a token used to unregister. Safe to call
+    /// from any thread.
     @discardableResult
-    func addBufferHandler(_ handler: @escaping BufferHandler) -> UUID {
-        let id = UUID()
-        handlers[id] = handler
-        return id
+    nonisolated func addBufferHandler(_ handler: @escaping BufferHandler) -> UUID {
+        handlerStore.add(handler)
     }
 
-    func removeBufferHandler(_ id: UUID) {
-        handlers.removeValue(forKey: id)
+    /// Unregister a handler by token. Safe to call from any thread.
+    nonisolated func removeBufferHandler(_ id: UUID) {
+        handlerStore.remove(id)
     }
 
     // MARK: - Lifecycle
@@ -126,11 +126,14 @@ final class MicCapture {
 
         // Remove any prior tap before installing — defensive against repeat calls.
         input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, when in
-            // CALLED ON AUDIO THREAD. Keep work minimal here.
-            guard let self else { return }
-            let handlers = MainActor.assumeIsolated { self.handlers }
-            for handler in handlers.values { handler(buffer, when) }
+        let store = handlerStore  // capture the Sendable store, not self
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, when in
+            // CALLED ON AUDIO RENDER THREAD. Keep work minimal here.
+            // We read handlers via a lock-protected store — no actor hop,
+            // no allocation in the hot path beyond the snapshot array.
+            for handler in store.snapshot() {
+                handler(buffer, when)
+            }
         }
 
         do {
@@ -200,16 +203,48 @@ extension MicCapture {
     /// Cancelling the consuming task automatically removes the handler.
     nonisolated func bufferStream() -> AsyncStream<(AVAudioPCMBuffer, AVAudioTime)> {
         AsyncStream { continuation in
-            Task { @MainActor in
-                let token = self.addBufferHandler { buffer, when in
-                    continuation.yield((buffer, when))
-                }
-                continuation.onTermination = { [weak self] _ in
-                    Task { @MainActor [weak self] in
-                        self?.removeBufferHandler(token)
-                    }
-                }
+            let token = self.addBufferHandler { buffer, when in
+                continuation.yield((buffer, when))
+            }
+            continuation.onTermination = { [weak self] _ in
+                self?.removeBufferHandler(token)
             }
         }
+    }
+}
+
+// MARK: - Lock-protected handler store
+//
+// The audio render thread cannot hop to the main actor (it's a real-time
+// thread; `MainActor.assumeIsolated` would crash with EXC_BREAKPOINT). So
+// the handler dictionary lives in this @unchecked Sendable class with an
+// NSLock protecting the dictionary itself.
+//
+// `snapshot()` returns a value-typed Array so the tap callback can iterate
+// without holding the lock during user code.
+
+private final class BufferHandlerStore: @unchecked Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var handlers: [UUID: MicCapture.BufferHandler] = [:]
+
+    nonisolated func add(_ handler: @escaping MicCapture.BufferHandler) -> UUID {
+        let id = UUID()
+        lock.lock()
+        handlers[id] = handler
+        lock.unlock()
+        return id
+    }
+
+    nonisolated func remove(_ id: UUID) {
+        lock.lock()
+        handlers.removeValue(forKey: id)
+        lock.unlock()
+    }
+
+    nonisolated func snapshot() -> [MicCapture.BufferHandler] {
+        lock.lock()
+        let result = Array(handlers.values)
+        lock.unlock()
+        return result
     }
 }
