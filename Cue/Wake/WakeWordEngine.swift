@@ -33,11 +33,22 @@ final class WakeWordEngine: @unchecked Sendable {
     /// decode count). Useful when wake-word isn't firing and you want to
     /// confirm audio is reaching the engine. Flip to false to silence.
     private static let VerboseDiag: Bool = true
+    /// When true, run a parallel sherpa-onnx ASR on the same audio + same
+    /// model and log the running transcript. This is the diagnostic for
+    /// "I said 'Hey Cue' and the KWS didn't fire — what did the model
+    /// think I said?". Logs partial hypotheses (when text changes) and a
+    /// final line at each silence endpoint. ~2x the inference cost; off
+    /// in production. Independent from VerboseDiag.
+    private static let VerboseAsr: Bool = true
 
     // MARK: - Inference
     private let queue = DispatchQueue(label: "cue.wake.kws", qos: .userInitiated)
     private var spotter: SherpaOnnxKeywordSpotterWrapper?
     private var lastFireAt: Date = .distantPast
+
+    // MARK: - Diagnostic ASR (DEBUG)
+    private var asr: SherpaOnnxRecognizer?
+    private var lastAsrText: String = ""
 
     // MARK: - Diagnostics (DEBUG)
     /// Per-second heartbeat: how many samples have been fed, accumulated
@@ -134,6 +145,22 @@ final class WakeWordEngine: @unchecked Sendable {
         )
         spotter = withUnsafePointer(to: &config) { SherpaOnnxKeywordSpotterWrapper(config: $0) }
         log.info("kws spotter ready — threshold=\(Self.KeywordsThreshold)")
+
+        if Self.VerboseAsr {
+            // Build a streaming ASR on the SAME model files. Endpoint
+            // detection auto-resets the stream after ~1s of trailing
+            // silence so we get clean "you said X" lines per utterance.
+            var asrConfig = sherpaOnnxOnlineRecognizerConfig(
+                featConfig: feat,
+                modelConfig: model,
+                enableEndpoint: true,
+                rule1MinTrailingSilence: 1.0,
+                rule2MinTrailingSilence: 0.6,
+                rule3MinUtteranceLength: 20
+            )
+            asr = withUnsafePointer(to: &asrConfig) { SherpaOnnxRecognizer(config: $0) }
+            log.info("kws diag asr ready (parallel transcription)")
+        }
     }
 
     /// Called on MicCapture's handler thread (AVAudioEngine input thread).
@@ -188,6 +215,25 @@ final class WakeWordEngine: @unchecked Sendable {
     private func feed(samples: [Float]) {
         guard let spotter else { return }
         spotter.acceptWaveform(samples: samples, sampleRate: Int(Self.TargetSampleRate))
+
+        // Parallel ASR over the same audio: feed, decode, log partials when
+        // the running text changes, log a "final" line at each endpoint.
+        if let asr {
+            asr.acceptWaveform(samples: samples, sampleRate: Int(Self.TargetSampleRate))
+            while asr.isReady() { asr.decode() }
+            let text = asr.getResult().text
+            if !text.isEmpty && text != lastAsrText {
+                log.info("asr partial: '\(text)'")
+                lastAsrText = text
+            }
+            if asr.isEndpoint() {
+                if !text.isEmpty {
+                    log.info("asr final:   '\(text)'")
+                }
+                asr.reset()
+                lastAsrText = ""
+            }
+        }
 
         // Diagnostic accumulators: count samples and sum-of-squares for RMS.
         if Self.VerboseDiag {
@@ -251,6 +297,8 @@ final class WakeWordEngine: @unchecked Sendable {
         diagSamplesFed = 0
         diagSumSquares = 0
         diagDecodeCount = 0
+        asr?.reset()
+        lastAsrText = ""
     }
 
     private func bundleURL(_ name: String, ext: String) -> URL? {
