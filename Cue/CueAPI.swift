@@ -519,21 +519,36 @@ final class CueAPI: ObservableObject {
         log.info("→ \(method, privacy: .public) \(path, privacy: .public) (auth=\(self.token != nil))")
         if method != "GET" { logBody("→ req body", bodyData) }
 
-        let data: Data
-        let response: URLResponse
+        // Run URLSession on a detached task so the network completion isn't
+        // gated on the main actor being free. We measure the wall-clock
+        // network time inside the detached task, then compare it to the
+        // total elapsed (which is measured on main and includes time the
+        // continuation spent queued waiting for the main actor). The
+        // difference is `mainWait` — main-actor contention.
+        let sessionRef = session
+        let reqCopy = req
+        let networkResult: (data: Data, response: URLResponse, networkSeconds: TimeInterval)
         do {
-            (data, response) = try await session.data(for: req)
+            networkResult = try await Task.detached(priority: .userInitiated) {
+                let netStart = Date()
+                let (data, response) = try await sessionRef.data(for: reqCopy)
+                return (data, response, Date().timeIntervalSince(netStart))
+            }.value
         } catch {
             log.error("✗ \(method, privacy: .public) \(path, privacy: .public) transport error after \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(error.localizedDescription, privacy: .public)")
             throw error
         }
+        let data = networkResult.data
+        let response = networkResult.response
+        let totalSeconds = Date().timeIntervalSince(started)
+        let mainWait = max(0, totalSeconds - networkResult.networkSeconds)
 
         guard let http = response as? HTTPURLResponse else {
             log.error("✗ \(method, privacy: .public) \(path, privacy: .public) non-HTTP response")
             throw CueAPIError.invalidResponse
         }
 
-        log.info("← \(http.statusCode) \(method, privacy: .public) \(path, privacy: .public) [\(data.count) bytes, \(String(format: "%.2f", Date().timeIntervalSince(started)))s]")
+        log.info("← \(http.statusCode) \(method, privacy: .public) \(path, privacy: .public) [\(data.count) bytes, \(String(format: "%.2f", totalSeconds))s = net \(String(format: "%.2f", networkResult.networkSeconds))s + main-wait \(String(format: "%.2f", mainWait))s]")
         logBody("← resp body", data)
 
         if http.statusCode == 401 {
