@@ -53,7 +53,13 @@ final class MicCapture {
 
     typealias BufferHandler = @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void
 
-    private let engine = AVAudioEngine()
+    // Recreated on every start() — AVAudioEngine caches the input bus
+    // format at construction time, so an engine instance that lived
+    // through an AVAudioSession category change (e.g. WebRTC's .videoChat
+    // for the realtime voice session) will throw "Input HW format and
+    // tap format not matching" when its tap is reinstalled. A fresh
+    // engine reads the current hardware format cleanly.
+    private var engine = AVAudioEngine()
     private let handlerStore = BufferHandlerStore()
     private var interruptionObserver: Any?
     private var startCount: Int = 0   // simple ref count so multiple callers can request capture
@@ -114,6 +120,10 @@ final class MicCapture {
             return
         }
 
+        // Rebuild the engine each start so it reflects the current
+        // AVAudioSession state. See comment on the `engine` property.
+        engine = AVAudioEngine()
+
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         // Sample rate of 0 means no hardware available (eg simulator without mic permission).
@@ -123,9 +133,6 @@ final class MicCapture {
             return
         }
         currentFormat = format
-
-        // Remove any prior tap before installing — defensive against repeat calls.
-        input.removeTap(onBus: 0)
         let store = handlerStore  // capture the Sendable store, not self
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, when in
             // CALLED ON AUDIO RENDER THREAD. Keep work minimal here.
