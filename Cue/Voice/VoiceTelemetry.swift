@@ -11,8 +11,13 @@ private let log = Logger(subsystem: "com.toug.cue", category: "VoiceTelemetry")
 ///     traceId. If `traceId` is `nil` (tracing disabled server-side) all
 ///     `record(...)` calls become no-ops.
 ///   - `start()` kicks off the periodic flush loop.
-///   - `record(direction:type:payload:)` is safe to call from anywhere;
-///     the actor serialises access to the buffer.
+///   - `record(direction:type:payload:)` is non-isolated and synchronous —
+///     callers append directly to a lock-guarded buffer, which preserves
+///     the order events were observed at the call site. Wrapping each call
+///     in `Task { await tel.record(...) }` (the old shape) reordered events
+///     non-deterministically before they reached the actor's mailbox, which
+///     made `response.done` race past `audio_transcript.done` server-side
+///     and left assistant transcripts null on the LangSmith run.
 ///   - `stop()` cancels the loop and performs one final flush so the tail
 ///     of the session always lands in LangSmith.
 ///
@@ -26,9 +31,13 @@ actor VoiceTelemetry {
 
     private let traceId: String
     private let api: CueAPI
-    private var buffer: [[String: Any]] = []
     private var flushTask: Task<Void, Never>?
-    private var stopped = false
+
+    // Buffer + stopped flag live outside actor isolation so `record` can be
+    // a synchronous nonisolated call. Order is preserved by `bufferLock`.
+    private nonisolated let bufferLock = NSLock()
+    private nonisolated(unsafe) var pendingEvents: [[String: Any]] = []
+    private nonisolated(unsafe) var stoppedFlag = false
 
     /// Time between automatic flushes. The realtime UX is sub-second so
     /// 750 ms keeps LangSmith near-real-time without spamming the backend.
@@ -40,35 +49,58 @@ actor VoiceTelemetry {
     }
 
     func start() {
-        guard flushTask == nil, !stopped else { return }
+        guard flushTask == nil, !isStopped() else { return }
         flushTask = Task { [weak self] in
             await self?.loop()
         }
     }
 
     private func loop() async {
-        while !stopped {
+        while !isStopped() {
             try? await Task.sleep(nanoseconds: flushIntervalNs)
             if Task.isCancelled { break }
             await flushLocked()
         }
     }
 
-    func record(direction: Direction, type: String, payload: Any? = nil) {
-        guard !stopped else { return }
+    nonisolated func record(direction: Direction, type: String, payload: Any? = nil) {
         let event: [String: Any] = [
             "direction": direction.rawValue,
             "type": type,
             "ts": Int(Date().timeIntervalSince1970 * 1000),
             "payload": payload ?? [String: Any](),
         ]
-        buffer.append(event)
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        guard !stoppedFlag else { return }
+        pendingEvents.append(event)
+    }
+
+    // Sync helpers — keep all NSLock calls out of async contexts so we don't
+    // trip the Swift 6 'lock unavailable from asynchronous contexts' rule.
+    private nonisolated func isStopped() -> Bool {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return stoppedFlag
+    }
+
+    private nonisolated func markStopped() {
+        bufferLock.lock()
+        stoppedFlag = true
+        bufferLock.unlock()
+    }
+
+    private nonisolated func drain() -> [[String: Any]] {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        let snapshot = pendingEvents
+        pendingEvents.removeAll(keepingCapacity: true)
+        return snapshot
     }
 
     private func flushLocked() async {
-        guard !buffer.isEmpty else { return }
-        let toSend = buffer
-        buffer.removeAll(keepingCapacity: true)
+        let toSend = drain()
+        guard !toSend.isEmpty else { return }
         do {
             try await api.postVoiceEvents(traceId: traceId, events: toSend)
         } catch {
@@ -77,7 +109,7 @@ actor VoiceTelemetry {
     }
 
     func stop() async {
-        stopped = true
+        markStopped()
         flushTask?.cancel()
         flushTask = nil
         await flushLocked()
