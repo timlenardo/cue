@@ -5,6 +5,7 @@ struct EntryView: View {
     @EnvironmentObject var api: CueAPI
 
     @State private var url: String = ""
+    @FocusState private var urlFieldFocused: Bool
 
     private func detectPlatform(_ raw: String) -> String? {
         let u = raw.lowercased()
@@ -130,6 +131,8 @@ struct EntryView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
+                    .focused($urlFieldFocused)
+                    .frame(maxWidth: .infinity)
                     .disabled(isLoading)
 
                     if !url.isEmpty {
@@ -156,6 +159,11 @@ struct EntryView: View {
                                 .stroke(palette.cardEdge, lineWidth: 0.5)
                         )
                 )
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .onTapGesture {
+                    guard !isLoading else { return }
+                    urlFieldFocused = true
+                }
 
                 HStack {
                     Text("Spotify · Apple Podcasts · RSS")

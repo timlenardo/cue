@@ -156,17 +156,14 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     }
 
     private func configureAudioSessionForWebRTC() {
-        // Tell WebRTC what category/mode/options to use whenever IT
-        // (re)activates the audio session, otherwise our local override
-        // gets reset the moment audio starts flowing.
-        //
-        // .videoChat routes to the loud speaker by default; .voiceChat
-        // assumes phone-to-ear use and pins output to the earpiece even
-        // when .defaultToSpeaker is set and overrideOutputAudioPort is
-        // called — which is the bug we kept hitting.
+        // .videoChat + .defaultToSpeaker matches the podcast player's route
+        // policy: loud speaker when nothing else is connected, but iOS
+        // routes to wired earphones / Bluetooth / AirPlay automatically
+        // when they are. Do NOT call overrideOutputAudioPort(.speaker) —
+        // that forces the loudspeaker even with headphones plugged in.
         let webRTCConfig = RTCAudioSessionConfiguration.webRTC()
         webRTCConfig.category = AVAudioSession.Category.playAndRecord.rawValue
-        webRTCConfig.categoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]
+        webRTCConfig.categoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay, .defaultToSpeaker]
         webRTCConfig.mode = AVAudioSession.Mode.videoChat.rawValue
         RTCAudioSessionConfiguration.setWebRTC(webRTCConfig)
 
@@ -175,23 +172,8 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         defer { session.unlockForConfiguration() }
         do {
             try session.setConfiguration(webRTCConfig, active: true)
-            try session.overrideOutputAudioPort(.speaker)
         } catch {
             log.error("RTCAudioSession config failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    /// Re-assert the loud-speaker route. Safe to call any time after the
-    /// session is active; useful after WebRTC has fully wired up audio
-    /// since its activation can clobber the initial override.
-    private func forceSpeakerOutput() {
-        let session = RTCAudioSession.sharedInstance()
-        session.lockForConfiguration()
-        defer { session.unlockForConfiguration() }
-        do {
-            try session.overrideOutputAudioPort(.speaker)
-        } catch {
-            log.error("overrideOutputAudioPort failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -258,10 +240,6 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     // MARK: - Data channel: open + inbound events
 
     private func handleDataChannelOpen() {
-        // WebRTC has now fully wired up audio — re-assert speaker so its
-        // activation doesn't leave us on the earpiece.
-        forceSpeakerOutput()
-
         if let msg = pendingContextMessage {
             log.info("sending context message (\(msg.count) chars)")
             sendEvent([
