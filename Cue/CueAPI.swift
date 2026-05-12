@@ -109,6 +109,45 @@ private struct LibraryListResponse: Codable {
     let items: [LibraryItem]
 }
 
+// MARK: - Voice realtime DTOs
+
+struct VoiceSessionRequest: Encodable {
+    let audioUrl: String
+    let pausedAtSeconds: Double
+    let totalDurationSeconds: Double?
+    let episodeTitle: String
+    let showTitle: String
+}
+
+/// Response from `POST /v1/voice/session`. `value` is the short-lived
+/// OpenAI Realtime ephemeral token; the iOS client uses it as the Bearer
+/// for the WebRTC SDP exchange against `https://api.openai.com/v1/realtime/calls`.
+/// `contextMessage` is the "[Episode context — last 5 min …]" user-role
+/// message we send into the conversation once the data channel opens.
+struct VoiceSessionResponse: Decodable {
+    let value: String
+    let expiresAt: Int?
+    let contextMessage: String?
+}
+
+struct SearchTranscriptRequest: Encodable {
+    let audioUrl: String
+    let query: String
+    let limit: Int?
+}
+
+struct TranscriptHit: Codable {
+    let fullText: String
+    let matchText: String
+    let matchPositionInSegment: Int
+    let timestampSeconds: Int
+    let timestampLabel: String
+}
+
+struct SearchTranscriptResponse: Codable {
+    let results: [TranscriptHit]
+}
+
 /// Streaming event emitted by `/v1/podcasts/transcribe` (NDJSON).
 enum TranscribeEvent {
     /// Server-side stage label.
@@ -213,6 +252,42 @@ final class CueAPI: ObservableObject {
 
     func resolvePodcast(url: String) async throws -> ResolvedPodcast {
         try await post("/v1/podcasts/resolve", body: ["url": url])
+    }
+
+    // MARK: - Voice realtime
+
+    /// Mints an OpenAI Realtime ephemeral token and bundles the rolling
+    /// 5-min transcript context for the iOS client to feed in as the
+    /// first conversation item.
+    func requestVoiceSession(
+        audioUrl: String,
+        pausedAtSeconds: Double,
+        totalDurationSeconds: Double?,
+        episodeTitle: String,
+        showTitle: String
+    ) async throws -> VoiceSessionResponse {
+        try await post("/v1/voice/session", body: VoiceSessionRequest(
+            audioUrl: audioUrl,
+            pausedAtSeconds: pausedAtSeconds,
+            totalDurationSeconds: totalDurationSeconds,
+            episodeTitle: episodeTitle,
+            showTitle: showTitle
+        ))
+    }
+
+    /// Server-side handler for the `search_transcript` realtime tool —
+    /// dispatched by the iOS client when it receives that function_call
+    /// event over the WebRTC data channel.
+    func searchTranscript(
+        audioUrl: String,
+        query: String,
+        limit: Int? = nil
+    ) async throws -> SearchTranscriptResponse {
+        try await post("/v1/voice/tools/search-transcript", body: SearchTranscriptRequest(
+            audioUrl: audioUrl,
+            query: query,
+            limit: limit
+        ))
     }
 
     /// Streams transcribe progress + result as NDJSON events.

@@ -65,8 +65,7 @@ struct PlayerView: View {
             }
 
             if state.voiceOpen {
-                VoiceAgentView(qaIndex: state.qaIdx)
-                    .id(state.qaIdx)
+                VoiceAgentView()
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
                     .zIndex(50)
             }

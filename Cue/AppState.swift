@@ -33,7 +33,6 @@ final class AppState: ObservableObject {
     @Published var speedIdx: Int = AppState.loadSpeedIdx() {
         didSet { AppState.saveSpeedIdx(speedIdx) }
     }
-    @Published var qaIdx: Int = 0
 
     private static let speedIdxKey = "cue.speedIdx"
 
@@ -54,6 +53,12 @@ final class AppState: ObservableObject {
 
     @Published var library: [LibraryItem] = []
     @Published var libraryLoading: Bool = false
+
+    /// Active OpenAI Realtime session, set while VoiceAgentView is on screen.
+    /// `nil` when the voice agent is closed, or when we opened the agent
+    /// without a live episode (canned-sample mode — no transcript to mint
+    /// a session against).
+    @Published var voiceSession: RealtimeVoiceSession?
 
     let audio = AudioPlayer()
     let wake = WakeWordEngine()
@@ -229,13 +234,44 @@ final class AppState: ObservableObject {
         // The agent owns the mic while it's on screen — avoid two
         // capture taps fighting for the input bus.
         wake.stop()
+
+        // Spin up a real OpenAI Realtime session whenever we have a live
+        // episode. Without `live` there's no audioUrl / transcript to mint
+        // a session against, so we leave voiceSession nil and let the view
+        // render an empty / "load an episode first" state.
+        guard let live, let pausedAt = currentPausedSeconds() else {
+            voiceSession = nil
+            return
+        }
+        let session = RealtimeVoiceSession(api: CueAPI.shared, state: self)
+        voiceSession = session
+        let ctx = RealtimeVoiceSession.Context(
+            audioUrl: live.episode.audioUrl,
+            pausedAtSeconds: pausedAt,
+            totalDurationSeconds: totalDuration > 0 ? totalDuration : nil,
+            episodeTitle: live.episode.title,
+            showTitle: live.show.title
+        )
+        Task { await session.start(context: ctx) }
     }
     func resumeAfterVoice() {
+        // Tear the realtime session down first so it stops claiming the
+        // mic / restores audio-session config before AudioPlayer resumes.
+        voiceSession?.stop()
+        voiceSession = nil
+
         withAnimation(.easeOut(duration: 0.25)) { voiceOpen = false }
-        qaIdx += 1
         if live != nil { audio.play(); audio.setRate(Float(speed)) }
         else { playing = true }
         wake.start()
+    }
+
+    /// AVPlayer's currentTime when live; falls back to the simulated
+    /// time otherwise. Returns nil when neither is meaningful (no live
+    /// episode loaded).
+    private func currentPausedSeconds() -> Double? {
+        if live != nil { return audio.currentTime }
+        return nil
     }
 
     // MARK: - Wake-word lifecycle
@@ -243,12 +279,6 @@ final class AppState: ObservableObject {
     /// Called from RootView once mic permission is granted / on foreground.
     func startWakeWord() { if !voiceOpen { wake.start() } }
     func stopWakeWord()  { wake.stop() }
-    func askAgain() {
-        withAnimation(.easeOut(duration: 0.2)) { voiceOpen = false }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            withAnimation(.easeOut(duration: 0.3)) { self.voiceOpen = true }
-        }
-    }
 
     func seek(_ t: Double) {
         let clamped = max(0, min(totalDuration, t))
@@ -372,7 +402,6 @@ final class AppState: ObservableObject {
     func loadLive(_ live: LiveEpisode, resumeAt: Double = 0) {
         self.live = live
         self.currentTime = resumeAt
-        self.qaIdx = 0
         self.lastSyncedPosition = -1
         self.lastNowPlayingSecond = -1
         if let url = URL(string: live.episode.audioUrl) {
