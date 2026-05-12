@@ -17,3 +17,6 @@ Pods/
 
 # Carthage
 Carthage/Build/
+
+# Vendored binaries (regenerate via vendor/bootstrap.sh)
+vendor/*.xcframework
