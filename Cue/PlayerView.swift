@@ -537,10 +537,11 @@ private struct NoteMarkers: View {
                         Image(systemName: "bookmark.fill")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Color(red: 1.0, green: 0.84, blue: 0.0))
-                            .shadow(color: .black.opacity(0.55), radius: 1.5, y: 1)
+                            .shadow(color: .black.opacity(0.85), radius: 3, y: 1.5)
+                            .shadow(color: .black.opacity(0.5), radius: 1)
                     }
                     .buttonStyle(.plain)
-                    .offset(x: trackWidth * CGFloat(pct) - 5, y: 8)
+                    .offset(x: trackWidth * CGFloat(pct) - 5, y: -1)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
