@@ -956,14 +956,12 @@ private struct VoiceOrbCore: View {
         let halo = blobCorners(t: t * Self.haloMorphSpeedFactor, amp: amp)
 
         ZStack {
-            // Sage-green liquid halo behind the core. Lights up only
-            // while the user is actually speaking; ramped through
-            // `haloEnvelope` (computed in the body) so it swells in
-            // gradually rather than tracking the raw input level. When
-            // `haloOpacity == 0` (the assistant is replying), SwiftUI
-            // skips rendering the chain entirely — same effect as
-            // removing the view from the tree, without confusing the
-            // ViewBuilder's type inference on the long modifier chain.
+            // Sage-green liquid halo behind the core. Lights up while
+            // the user is actually speaking and decays to the
+            // `haloOpacityIdle` baseline (0.05) otherwise — `haloOpacity`
+            // is computed once in the body via `haloEnvelope` so the
+            // appearance ramps gradually across the attack/release
+            // window rather than tracking the raw 20 Hz input level.
             LiquidMorphShape(corners: halo)
                 .fill(Ambient.accent)
                 .frame(width: Self.haloSize, height: Self.haloSize)
@@ -1121,12 +1119,12 @@ private struct VoiceWaveformBarCore: View {
     let glow: Color
 
     // Render the canvas taller than the 22pt scrubber slot so the wave's
-    // peaks (and now the very wide outer halo shadow at radius 180)
-    // aren't clipped at the top/bottom. The caller's .frame(22) still
-    // drives the surrounding layout — the canvas just overflows
-    // visually above and below the strip. Sized so peak wave amplitude
-    // (~40pt from mid) plus the widest shadow radius (~180pt) lands
-    // inside the canvas frame, with headroom for the shadow falloff.
+    // peaks + outer atmospheric shadow aren't clipped at the top/bottom.
+    // The caller's .frame(22) still drives the surrounding layout — the
+    // canvas just overflows visually above and below the strip. Sized
+    // generously so peak amplitude (~40pt from mid) plus the widest
+    // shadow radius (currently 40pt) fits with headroom for blur
+    // falloff and any future glow-radius bumps.
     private static let renderHeight: CGFloat = 440
     // Calibrated against the original 22pt visual amplitude so the wave
     // reads the same size even though the canvas is much taller.
@@ -1134,8 +1132,9 @@ private struct VoiceWaveformBarCore: View {
     // Horizontal canvas extension on each side. The shadow filter blurs
     // outward from the path; without slack, the glow at x=0 and x=width
     // gets clipped to the canvas edge, leaving the ends of the bar
-    // visibly truncated. Sized to match the widest shadow pass
-    // (radius 180) plus a little falloff headroom.
+    // visibly truncated. Sized generously beyond the current widest
+    // shadow pass (radius 40) so we don't have to retune this when
+    // the radii change.
     private static let glowMargin: CGFloat = 200
 
     var body: some View {
@@ -1151,13 +1150,12 @@ private struct VoiceWaveformBarCore: View {
             let boosted = min(1.0, gated * 3.0)
             let amp = pow(boosted, 0.85)
             // Glow scales with output level — no glow on the flat resting
-            // line; ramps in quickly as soon as the assistant starts
-            // speaking. `* 12` makes the ramp aggressive so even quiet
-            // syllables push the bar to full glow almost immediately.
-            // Four passes now: a sharp inner core, a mid bloom, a wide
-            // outer halo, and a super-wide atmospheric spill — sized to
-            // give the line a "filled-blob" presence comparable to the
-            // 150 pt orb halo on the listening side.
+            // line; saturates to full glow almost immediately as soon as
+            // the assistant starts speaking (`* 100` means any output
+            // level above ~0.01 reads as full glow). Four stacked passes
+            // (inner / mid bloom / wide halo / atmospheric spill) give
+            // the line a "filled-blob" presence comparable to the 150 pt
+            // orb halo on the listening side.
             let glowAlpha = min(1.0, max(0.0, Double(level) * 100.0))
             let bloomAlpha = glowAlpha
             let haloAlpha = glowAlpha
