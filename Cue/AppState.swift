@@ -242,6 +242,17 @@ final class AppState {
         startProgressSyncTimer()
         NowPlayingCenter.shared.attach(self)
 
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: .cuePlayPause, object: nil, queue: .main) { [weak self] _ in
+            self?.togglePlay()
+        }
+        nc.addObserver(forName: .cueSkip15Back, object: nil, queue: .main) { [weak self] _ in
+            self?.skipBack15()
+        }
+        nc.addObserver(forName: .cueSkip15Forward, object: nil, queue: .main) { [weak self] _ in
+            self?.skipFwd15()
+        }
+
         #if DEBUG
         // Diagnostic: log a single line every ~2s confirming the mic tap is
         // delivering buffers. Remove once the real wake-word listener is in.

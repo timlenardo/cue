@@ -27,21 +27,28 @@ final class LiveActivityController {
     /// existing activity so the most recent paste wins.
     func start(show: String, episode: String, duration: Double, elapsed: Double) {
         #if canImport(ActivityKit)
-        // Replace any existing activity first.
-        Task { @MainActor in await endNow() }
+        Task { @MainActor in
+            await endNow()
 
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+            let info = ActivityAuthorizationInfo()
+            print("[Cue/LA] start called. enabled=\(info.areActivitiesEnabled) freq=\(info.frequentPushesEnabled) show='\(show)' ep='\(episode)' dur=\(duration) elapsed=\(elapsed)")
+            guard info.areActivitiesEnabled else {
+                print("[Cue/LA] aborting: areActivitiesEnabled == false")
+                return
+            }
 
-        let attributes = CueActivityAttributes(show: show, episode: episode, duration: duration)
-        let state = CueActivityAttributes.ContentState(elapsed: elapsed, playing: true)
-        do {
-            activity = try Activity.request(
-                attributes: attributes,
-                content: .init(state: state, staleDate: nil)
-            )
-        } catch {
-            // Most common cause: Widget Extension target not yet added.
-            print("[Cue] Live Activity start failed: \(error)")
+            let attributes = CueActivityAttributes(show: show, episode: episode, duration: duration)
+            let state = CueActivityAttributes.ContentState(elapsed: elapsed, playing: true)
+            do {
+                let act = try Activity.request(
+                    attributes: attributes,
+                    content: .init(state: state, staleDate: nil)
+                )
+                activity = act
+                print("[Cue/LA] activity started id=\(act.id) state=\(act.activityState)")
+            } catch {
+                print("[Cue/LA] start failed: \(error)")
+            }
         }
         #endif
     }
