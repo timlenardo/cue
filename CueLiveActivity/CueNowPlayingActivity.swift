@@ -99,30 +99,52 @@ private struct LockScreenView: View {
     let state: CueActivityAttributes.ContentState
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Button(intent: PlayPauseIntent()) {
-                PlayGlyph(playing: state.playing, diameter: 64, iconSize: 24)
-            }
-            .buttonStyle(.plain)
+        let inVoice = state.inVoiceMode
+        let morph   = state.voiceMorphActive
 
+        HStack(alignment: .top, spacing: 12) {
+            // Play button → orb. Swap fires on `voiceMorphActive` (phase 2)
+            // so the structural swap lands after the surrounding controls
+            // have finished dimming — same staging as PlayerView.
+            ZStack {
+                if morph {
+                    VoiceOrbGlyph(diameter: 64, glowLevel: state.userGlowLevel)
+                        .transition(.opacity)
+                } else {
+                    Button(intent: PlayPauseIntent()) {
+                        PlayGlyph(playing: state.playing, diameter: 64, iconSize: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity)
+                }
+            }
+            .frame(width: 64, height: 64)
+            .animation(.easeInOut(duration: 0.25), value: morph)
+
+            // Right column sized to match the play button (64pt) so the
+            // bar's bottom aligns with the play button's bottom and the
+            // title's vertical center aligns with the play button's center.
             VStack(alignment: .leading, spacing: 0) {
-                // Show eyebrow — top edge aligns with top of play button.
+                // Show eyebrow — top of the column.
                 Text(attributes.show.uppercased())
                     .font(.system(size: 10, weight: .bold))
                     .tracking(1.2)
                     .foregroundStyle(LA.accent.opacity(0.9))
                     .shadow(color: LA.accentGlow.opacity(0.35), radius: 6)
                     .lineLimit(1)
-                    .padding(.bottom, 9)
+                    .opacity(inVoice ? 0.15 : 1)
 
-                // Episode title row — title center aligns with play button center.
+                Spacer(minLength: 0)
+
+                // Episode title + skip buttons — centered vertically in the
+                // column (= play button center). Static text, default tail
+                // truncation; no marquee.
                 HStack(alignment: .center, spacing: 8) {
-                    MarqueeText(
-                        text: attributes.episode,
-                        font: .system(size: 18, weight: .medium),
-                        foreground: LA.textBright
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(attributes.episode)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(LA.textBright)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                     Button(intent: Skip15BackIntent()) {
                         SkipGlyph(systemName: "gobackward.15")
@@ -134,19 +156,71 @@ private struct LockScreenView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.bottom, 8)
+                .opacity(inVoice ? 0.15 : 1)
+                .allowsHitTesting(!inVoice)
 
-                // Progress + remaining time on the right edge.
+                Spacer(minLength: 0)
+
+                // Progress + remaining time — bottom of the column, so the
+                // bar's bottom edge lines up with the play button's bottom.
                 HStack(alignment: .center, spacing: 8) {
-                    ProgressBar(elapsed: state.elapsed, duration: attributes.duration)
+                    ProgressBar(
+                        elapsed: state.elapsed,
+                        duration: attributes.duration,
+                        dynamicGlow: inVoice ? state.assistantGlowLevel : nil
+                    )
                     Text(remainingLabel(state.elapsed, duration: attributes.duration))
                         .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(LA.textFuture)
+                        .opacity(inVoice ? 0.15 : 1)
                 }
             }
+            .frame(height: 64)
         }
         .padding(14)
+        .animation(.easeInOut(duration: 0.25), value: inVoice)
+    }
+}
+
+// MARK: - Voice mode glyphs
+//
+// Lock-screen Live Activities can't drive their own per-frame animation
+// loop — `TimelineView(.animation)`, `withAnimation`, and `.animation(value:)`
+// are all ignored or throttled to a static snapshot per Apple's docs. The
+// only continuous motion channel is to push a new `ContentState` from the
+// app and let the system crossfade between snapshots. The orb halo's level
+// is the upstream-gated user amplitude — zero when the assistant is
+// speaking, so the orb reads as "muted and minimal" during AI turns.
+
+private struct VoiceOrbGlyph: View {
+    let diameter: CGFloat
+    /// 0…1 mic amplitude pushed from the app. Already phase-gated upstream
+    /// to `phase == .listening`, so it reads zero whenever the assistant
+    /// is speaking — the halo collapses to its base "minimal" appearance.
+    let glowLevel: Double
+
+    var body: some View {
+        ZStack {
+            // Sage-green halo. Base of 0.10 means the orb is barely
+            // haloed when the user isn't talking, then ramps to ~0.95
+            // on a loud peak. Same ramp on scale.
+            Circle()
+                .fill(LA.accent)
+                .frame(width: diameter * 1.6, height: diameter * 1.6)
+                .blur(radius: 18)
+                .opacity(0.10 + glowLevel * 0.85)
+                .scaleEffect(1.0 + CGFloat(glowLevel) * 0.22)
+
+            // White core — gently scales with amplitude so the whole orb
+            // breathes together rather than the halo floating on a flat disc.
+            Circle()
+                .fill(LA.textPrimary)
+                .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
+                .frame(width: diameter, height: diameter)
+                .scaleEffect(1.0 + CGFloat(glowLevel) * 0.10)
+                .shadow(color: .white.opacity(0.15 + glowLevel * 0.55), radius: 10 + glowLevel * 14)
+        }
     }
 }
 
@@ -189,67 +263,59 @@ private struct PlayGlyph: View {
 private struct ProgressBar: View {
     let elapsed: Double
     let duration: Double
+    /// nil → static glow (outside voice mode). Non-nil → in voice mode,
+    /// the bar fills 100%, and a blurred sage halo capsule behind it
+    /// reacts to this amplitude (0…1). Mirrors the orb's halo+core
+    /// construction so the bloom reads at similar strength.
+    var dynamicGlow: Double? = nil
 
     var body: some View {
         GeometryReader { proxy in
+            let fillWidth = max(8, proxy.size.width * CGFloat(progress))
             ZStack(alignment: .leading) {
+                // Track.
                 Capsule()
                     .fill(LA.trackBase)
+
+                // Halo: blurred sage capsule, fully proportional to the
+                // assistant level so it disappears entirely between turns.
+                if let g = dynamicGlow, g > 0 {
+                    Capsule()
+                        .fill(LA.accent)
+                        .frame(width: fillWidth)
+                        .scaleEffect(y: 1.5 + CGFloat(g) * 2.5)
+                        .blur(radius: 4 + CGFloat(g) * 6)
+                        .opacity(g * 1.15)
+                }
+
+                // Solid fill.
                 Capsule()
                     .fill(LA.accent)
-                    .frame(width: max(8, proxy.size.width * CGFloat(progress)))
-                    .shadow(color: LA.accentGlow.opacity(0.45), radius: 6)
+                    .frame(width: fillWidth)
+                    .shadow(color: LA.accentGlow.opacity(coreShadowOpacity), radius: coreShadowRadius)
             }
         }
         .frame(height: 8)
     }
 
     private var progress: Double {
+        // Full bar in voice mode (regardless of elapsed/duration).
+        if dynamicGlow != nil { return 1 }
         guard duration > 0 else { return 0 }
         return min(1, max(0, elapsed / duration))
     }
-}
 
-// MARK: - Marquee text
+    // Shadow on the SOLID fill — outside voice mode, the original static
+    // glow. In voice mode, fully proportional (no base) so the bar reads
+    // as a flat green capsule when the assistant is silent.
+    private var coreShadowOpacity: Double {
+        guard let g = dynamicGlow else { return 0.45 }
+        return g * 0.70
+    }
 
-// Live Activities don't run animation loops the way apps do, so true 60fps
-// marquee isn't possible. This uses TimelineView(.animation) which iOS will
-// throttle to ~1Hz on the lock screen (smoother in the Dynamic Island). Only
-// triggers for titles long enough that they'd be clipped at the default font.
-private struct MarqueeText: View {
-    let text: String
-    let font: Font
-    let foreground: Color
-
-    private static let charLimit = 22
-
-    var body: some View {
-        if text.count > Self.charLimit {
-            GeometryReader { proxy in
-                TimelineView(.animation) { context in
-                    let t = context.date.timeIntervalSinceReferenceDate
-                    let cycle: Double = 14.0
-                    let phase = t.truncatingRemainder(dividingBy: cycle) / cycle
-                    let position = (1 - cos(phase * 2 * .pi)) / 2
-                    let overflowChars = max(0, text.count - 16)
-                    let maxScroll = CGFloat(overflowChars) * 8.5
-
-                    Text(text)
-                        .font(font)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .foregroundStyle(foreground)
-                        .offset(x: -CGFloat(position) * maxScroll)
-                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
-                        .clipped()
-                }
-            }
-            .frame(height: 22)
-        } else {
-            Text(text)
-                .font(font)
-                .lineLimit(1)
-                .foregroundStyle(foreground)
-        }
+    private var coreShadowRadius: CGFloat {
+        guard let g = dynamicGlow else { return 6 }
+        return CGFloat(g) * 14
     }
 }
+
