@@ -198,10 +198,13 @@ final class AppState {
 
         wake.onDetect = { [weak self] in self?.openVoiceAgent() }
 
-        // Mirror AudioPlayer's time + playing state into AppState's @Published
-        // properties so transcript/progress views update reactively.
+        // Mirror AudioPlayer's time + playing state into AppState so the
+        // transcript / progress views update reactively. `AudioPlayer`
+        // already publishes on the main thread (its `addPeriodicTimeObserver`
+        // is registered with `queue: .main` and `pause()`/`play()` run on
+        // the main actor), so we don't need a `.receive(on:)` hop — that
+        // was burning 20 GCD round-trips/sec while playing.
         audio.$currentTime
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] t in
                 guard let self else { return }
                 if self.live != nil {
@@ -225,7 +228,6 @@ final class AppState {
             .store(in: &audioSubs)
 
         audio.$isPlaying
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] p in
                 guard let self else { return }
                 if self.live != nil { self.playing = p }
@@ -305,10 +307,21 @@ final class AppState {
 
     @ObservationIgnored private var lastNowPlayingSecond: Int = -1
 
+    /// Starts the 30 Hz canned-sample tick. Only ever needed when there's
+    /// no live episode — gets cancelled in `loadLive` and restarted in
+    /// `endPlayback` so we don't pump a Combine sink 30×/sec during real
+    /// playback (the sink no-ops then, but the timer still fires).
     private func startSimulatedTimer() {
+        guard simulatedTimer == nil else { return }
         simulatedTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in self?.simulatedTick() }
+    }
+
+    private func stopSimulatedTimer() {
+        simulatedTimer?.cancel()
+        simulatedTimer = nil
+        lastSimulatedTick = nil
     }
 
     /// Advances time only for the canned sample (no `live`). AVPlayer drives time when live.
@@ -572,6 +585,9 @@ final class AppState {
     /// Called after a successful resolve+transcribe (EntryView) or when
     /// reopening from the library. `resumeAt` is the seek position in seconds.
     func loadLive(_ live: LiveEpisode, resumeAt: Double = 0) {
+        // AVPlayer drives `currentTime` from here on — kill the canned-
+        // sample 30 Hz pump.
+        stopSimulatedTimer()
         self.live = live
         self.currentTime = resumeAt
         self.lastSyncedPosition = -1
@@ -613,6 +629,8 @@ final class AppState {
         currentTime = 0
         NowPlayingCenter.shared.clear()
         LiveActivityController.shared.end()
+        // Canned-sample mode is back in effect — re-arm the 30 Hz pump.
+        startSimulatedTimer()
         minimizePlayer()
     }
 

@@ -9,6 +9,23 @@ struct EpisodeArtworkView: View {
     var size: CGFloat = 56
     var radius: CGFloat = 12
 
+    // Computed once at init; body reads cached values. The mini-player's
+    // body re-runs at ~10 Hz (it observes `currentTime` for the progress
+    // strip) and library rows can be rebuilt on every scroll diff, so even
+    // though the inputs rarely change, recomputing the FNV-1a hash + token
+    // split each render adds up.
+    private let monogramText: String
+    private let monogramColor: Color
+
+    init(urlString: String?, fallbackTitle: String, size: CGFloat = 56, radius: CGFloat = 12) {
+        self.urlString = urlString
+        self.fallbackTitle = fallbackTitle
+        self.size = size
+        self.radius = radius
+        self.monogramText = EpisodeArtworkMonogram.text(from: fallbackTitle)
+        self.monogramColor = EpisodeArtworkMonogram.color(from: fallbackTitle)
+    }
+
     var body: some View {
         Group {
             if let s = urlString, let url = URL(string: s) {
@@ -44,15 +61,11 @@ struct EpisodeArtworkView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            Text(EpisodeArtworkMonogram.text(from: fallbackTitle))
+            Text(monogramText)
                 .font(Fonts.serif(size * 0.36, weight: .semibold))
                 .tracking(-0.5)
                 .foregroundStyle(.white)
         }
-    }
-
-    private var monogramColor: Color {
-        EpisodeArtworkMonogram.color(from: fallbackTitle)
     }
 }
 

@@ -103,7 +103,12 @@ final class RealtimeVoiceSession: NSObject {
             audioDevice: device
         )
         super.init()
-        startLevelMetering()
+        // NB: level metering is started from `start(context:)` once the
+        // session is committed to running. Starting it in init() ran the
+        // 20 Hz Combine pipeline through the entire construct → start gap
+        // (and during the Connecting phase before `peerConnection` is set
+        // up the closure is a pure no-op that still mutates @Observable
+        // inputLevel/outputLevel to 0 every 50 ms).
     }
 
     deinit {
@@ -152,11 +157,18 @@ final class RealtimeVoiceSession: NSObject {
     }
 
     /// One-pole low-pass into the published levels so the UI breathes
-    /// instead of strobing on every 20Hz tick.
+    /// instead of strobing on every 20 Hz tick. Skips the assignment when
+    /// the smoothed delta is below the visible threshold — @Observable
+    /// mutations fire `withMutation` regardless of whether the value
+    /// actually changed, so deduping here avoids invalidating any view
+    /// that reads `inputLevel` / `outputLevel` (the orb + waveform) 20
+    /// times per second of silence.
     private func applyLevels(input: Float, output: Float) {
         let alpha: Float = 0.4
-        inputLevel  = inputLevel  + (input  - inputLevel)  * alpha
-        outputLevel = outputLevel + (output - outputLevel) * alpha
+        let nextIn  = inputLevel  + (input  - inputLevel)  * alpha
+        let nextOut = outputLevel + (output - outputLevel) * alpha
+        if abs(nextIn  - inputLevel)  > 0.001 { inputLevel  = nextIn  }
+        if abs(nextOut - outputLevel) > 0.001 { outputLevel = nextOut }
     }
 
     // MARK: - Public
@@ -167,6 +179,7 @@ final class RealtimeVoiceSession: NSObject {
         errorMessage = nil
         userTranscript = ""
         assistantTranscript = ""
+        startLevelMetering()
 
         log.info("start session episode=\(context.episodeTitle, privacy: .public) pausedAt=\(context.pausedAtSeconds)")
 

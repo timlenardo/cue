@@ -166,20 +166,37 @@ private struct TranscriptScrollView: View {
     @State private var scrollTopId: Int?
     @State private var didInitialScroll: Bool = false
 
+    /// Largest index `i` such that `key(arr[i]) <= target`. Returns -1
+    /// when target precedes all entries. Both transcript arrays are sorted
+    /// by `start`, so this is O(log N) — versus the O(N) reverse scans
+    /// this replaces, which at 10 Hz × 9000 words burned ~10 µs/sec
+    /// scanning in the active-word case.
+    private static func lastIndex<T>(of arr: [T], where key: (T) -> Double, leq target: Double) -> Int {
+        var lo = 0, hi = arr.count - 1, ans = -1
+        while lo <= hi {
+            let mid = (lo + hi) >> 1
+            if key(arr[mid]) <= target {
+                ans = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return ans
+    }
+
     var activeSentenceIdx: Int {
         let t = state.currentTime
-        var idx = 0
-        for s in state.transcriptSentences.reversed() where t >= s.start {
-            idx = s.id
-            break
-        }
-        return idx
+        let sentences = state.transcriptSentences
+        let i = Self.lastIndex(of: sentences, where: { $0.start }, leq: t)
+        return i >= 0 ? sentences[i].id : 0
     }
 
     var activeWordGlobalIdx: Int {
         let t = state.currentTime
-        for w in state.transcriptWords.reversed() where t >= w.start { return w.globalIdx }
-        return -1
+        let words = state.transcriptWords
+        let i = Self.lastIndex(of: words, where: { $0.start }, leq: t)
+        return i >= 0 ? words[i].globalIdx : -1
     }
 
     var body: some View {
@@ -602,7 +619,12 @@ private struct SecondaryRow: View {
 
             Spacer(minLength: 0)
 
-            ListeningPill(playing: state.playing)
+            // Suppress the .repeatForever animations while the voice agent
+            // is open — SecondaryRow is dimmed to 0.15 opacity then, but
+            // SwiftUI keeps animating the (mostly invisible) bars + halo
+            // anyway because the animation engine doesn't see parent
+            // opacity. Cuts wasted GPU cycles during voice mode.
+            ListeningPill(active: state.playing && !state.voiceOpen)
                 .onTapGesture { state.openVoiceAgent() }
 
             Spacer(minLength: 0)
@@ -622,7 +644,11 @@ private struct SecondaryRow: View {
 // MARK: - "Cue is listening" pill
 
 private struct ListeningPill: View {
-    let playing: Bool
+    /// True iff the pill should run its idle `.repeatForever` motion.
+    /// Combine of `state.playing && !state.voiceOpen` upstream — when the
+    /// voice agent is open the pill is dimmed to 0.15 opacity but its
+    /// animations were still running.
+    let active: Bool
     @State private var pulse = false
     @State private var wave = false
 
@@ -635,7 +661,7 @@ private struct ListeningPill: View {
                         .fill(Ambient.accent.opacity(0.8))
                         .frame(width: 3, height: barHeight(i: i))
                         .animation(
-                            playing
+                            active
                                 ? .easeInOut(duration: 1.2)
                                     .repeatForever(autoreverses: true)
                                     .delay(staggerDelay(i: i))
@@ -669,7 +695,7 @@ private struct ListeningPill: View {
                 .opacity(pulse ? 0.5 : 0.25)
                 .offset(x: -16, y: -10)
                 .animation(
-                    playing
+                    active
                         ? .easeInOut(duration: 4.0).repeatForever(autoreverses: true)
                         : .easeOut(duration: 0.4),
                     value: pulse
@@ -680,11 +706,11 @@ private struct ListeningPill: View {
             pulse = true
             wave = true
         }
-        .onChange(of: playing) { _, isPlaying in
+        .onChange(of: active) { _, isActive in
             // Keep animation flags live regardless; the conditional .animation
             // modifier above is what gates the actual motion.
-            pulse = isPlaying
-            wave = isPlaying
+            pulse = isActive
+            wave = isActive
             // Re-arm on the next tick so .repeatForever picks up after pause.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 pulse = true
@@ -694,7 +720,7 @@ private struct ListeningPill: View {
     }
 
     private func barHeight(i: Int) -> CGFloat {
-        guard playing && wave else { return 5 }
+        guard active && wave else { return 5 }
         // Static seed pattern; the .repeatForever animation handles motion.
         let seeds: [CGFloat] = [12, 16, 10, 14]
         return seeds[i % seeds.count]
