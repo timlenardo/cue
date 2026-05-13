@@ -325,7 +325,7 @@ struct LiquidOrbDebugCore: View {
 // MARK: - Debug screen
 
 struct LiquidOrbDebugView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     @State private var params = LiquidOrbParams()
     @State private var selectedPresetID: String? = "default"
     @State private var manualLevel: Double = 0.0
@@ -695,7 +695,7 @@ struct LiquidOrbDebugView: View {
 /// Pulled out so the @ObservedObject re-render path is isolated — the rest
 /// of the debug header doesn't need to re-evaluate on every audio tick.
 private struct LiveMetaStrip: View {
-    @ObservedObject var session: RealtimeVoiceSession
+    let session: RealtimeVoiceSession
     let accent: Color
     let ink: Color
     let inkMuted: Color
