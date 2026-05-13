@@ -71,9 +71,19 @@ struct PlayerView: View {
                 VStack(spacing: 26) {
                     ProgressBar()
                     PrimaryControls()
-                    SecondaryRow()
-                        .opacity(state.voiceOpen ? 0.15 : 1)
-                        .allowsHitTesting(!state.voiceOpen)
+                    ZStack {
+                        SecondaryRow()
+                            .opacity(state.voiceOpen ? 0.15 : 1)
+                            .allowsHitTesting(!state.voiceOpen)
+                        // Resume button — sits in the listening pill's slot,
+                        // fades in alongside the orb/waveform when phase 2
+                        // of openVoiceAgent fires (voiceMorphActive=true).
+                        // Outside SecondaryRow's opacity scope so it stays
+                        // at full brightness while the rest of the row dims.
+                        ResumeButton { state.closeVoiceAgent() }
+                            .opacity(state.voiceMorphActive ? 1 : 0)
+                            .allowsHitTesting(state.voiceMorphActive)
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 4)
@@ -702,6 +712,34 @@ private struct ListeningPill: View {
 
     private func staggerDelay(i: Int) -> Double {
         [0.0, 0.2, 0.4, 0.1][i % 4]
+    }
+}
+
+// MARK: - Resume button (assistant mode)
+
+/// Sized-to-content "Resume" pill that takes over the listening-pill's
+/// slot during voice-agent mode. Same capsule background, font, and
+/// vertical padding as `ListeningPill`; horizontal padding kept at
+/// 20pt so the touch target reads as the same shape, just narrower.
+private struct ResumeButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("Resume")
+                .font(.system(size: 13, weight: .semibold))
+                .tracking(0.2)
+                .foregroundStyle(Ambient.textPrimary)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(
+                    ZStack {
+                        Capsule().fill(Ambient.surface.opacity(0.55))
+                        Capsule().stroke(Ambient.surfaceEdge, lineWidth: 1)
+                    }
+                )
+        }
+        .buttonStyle(.plain)
     }
 }
 
