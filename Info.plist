@@ -28,6 +28,8 @@
 	<string>Cue listens for the wake phrase (&quot;QQ&quot; or &quot;Cue Cue&quot;) so you can ask questions about what&apos;s playing.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

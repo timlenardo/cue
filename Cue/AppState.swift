@@ -216,6 +216,10 @@ final class AppState {
     @ObservationIgnored private var micArmedForWake: Bool = false
     @ObservationIgnored private var audioSubs: Set<AnyCancellable> = []
     @ObservationIgnored private var progressSyncTimer: AnyCancellable?
+    /// Polls voiceSession.inputLevel at 5Hz while voice mode is open and
+    /// forwards it to the Live Activity glow channel. Throttling /
+    /// delta-gating happens inside `LiveActivityController.pushGlow`.
+    @ObservationIgnored private var liveActivityGlowTimer: Timer?
     @ObservationIgnored private var lastSyncedPosition: Double = -1
     @ObservationIgnored private var lastSyncAt: Date?
 
@@ -492,6 +496,14 @@ final class AppState {
         // visually bisect it.
         withAnimation(.easeOut(duration: 0.32)) { voiceOpen = true }
         withAnimation(.easeInOut(duration: 0.25)) { playbackDetailsVisible = false }
+        // Mirror phase 1 into the Live Activity: shade fades in, controls dim.
+        LiveActivityController.shared.updateVoiceMode(
+            inVoiceMode: true,
+            voiceMorphActive: false,
+            elapsed: currentTime,
+            playing: playing
+        )
+        startLiveActivityGlowSampler()
 
         // Pause podcast while the agent is open.
         if live != nil { audio.pause() }
@@ -506,6 +518,12 @@ final class AppState {
             try? await Task.sleep(nanoseconds: 270_000_000)
             guard let self, self.voiceOpen else { return }
             withAnimation(.easeInOut(duration: 0.25)) { self.voiceMorphActive = true }
+            LiveActivityController.shared.updateVoiceMode(
+                inVoiceMode: true,
+                voiceMorphActive: true,
+                elapsed: self.currentTime,
+                playing: self.playing
+            )
         }
 
         // Spin up a real OpenAI Realtime session whenever we have a live
@@ -536,6 +554,13 @@ final class AppState {
         // Phase 1 (reversed): waveform fades out. The shade and playback
         // details stay put during this phase.
         withAnimation(.easeInOut(duration: 0.25)) { voiceMorphActive = false }
+        LiveActivityController.shared.updateVoiceMode(
+            inVoiceMode: true,
+            voiceMorphActive: false,
+            elapsed: currentTime,
+            playing: playing
+        )
+        stopLiveActivityGlowSampler()
 
         // Phase 2 (reversed): once the waveform is gone, lift the shade
         // and fade the playback details back in.
@@ -550,6 +575,12 @@ final class AppState {
                 // the player can't end up closed-with-waveform-stuck.
                 self.voiceMorphActive = false
             }
+            LiveActivityController.shared.updateVoiceMode(
+                inVoiceMode: false,
+                voiceMorphActive: false,
+                elapsed: self.currentTime,
+                playing: self.playing
+            )
         }
 
         if live != nil { audio.play(); audio.setRate(Float(speed)) }
@@ -560,6 +591,51 @@ final class AppState {
             try? await Task.sleep(for: .milliseconds(300))
             self.updateWakeArmed()
         }
+    }
+
+    // MARK: - Live Activity glow sampler
+    //
+    // Lock-screen Live Activities can't drive their own animation loop;
+    // the only continuous-motion channel is to push a new ContentState
+    // and let the system crossfade between snapshots. We sample
+    // `voiceSession.inputLevel` and `outputLevel` at 5Hz, each gated by
+    // the matching phase (mic only counts while listening, output only
+    // counts while the assistant speaks). The two channels drive separate
+    // glow surfaces in the LA: orb halo (user) and progress bar (assistant).
+    private func startLiveActivityGlowSampler() {
+        stopLiveActivityGlowSampler()
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.voiceOpen else { return }
+                let session = self.voiceSession
+                let userLevel: Double = {
+                    guard let session, session.phase == .listening else { return 0 }
+                    return Double(session.inputLevel)
+                }()
+                // Assistant glow comes from the WebRTC inbound-rtp audio
+                // level. Phase-gated to `.speaking` and noise-floored to
+                // 0.02 (matches the in-app waveform's gating) so brief
+                // hisses between turns don't trigger a glow.
+                let assistantLevel: Double = {
+                    guard let session,
+                          session.phase == .speaking,
+                          session.outputLevel > 0.02 else { return 0 }
+                    return Double(session.outputLevel)
+                }()
+                LiveActivityController.shared.pushGlow(
+                    userLevel: userLevel,
+                    assistantLevel: assistantLevel,
+                    elapsed: self.currentTime,
+                    playing: self.playing
+                )
+            }
+        }
+        liveActivityGlowTimer = timer
+    }
+
+    private func stopLiveActivityGlowSampler() {
+        liveActivityGlowTimer?.invalidate()
+        liveActivityGlowTimer = nil
     }
 
     /// AVPlayer's currentTime when live; falls back to the simulated
