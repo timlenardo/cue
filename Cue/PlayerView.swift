@@ -230,10 +230,37 @@ private struct TranscriptScrollView: View {
         return i >= 0 ? words[i].globalIdx : -1
     }
 
+    /// Bucket the episode's saved notes by which sentence's [start, end)
+    /// window they fall in, so SentenceBlock can render a yellow attachment
+    /// directly below the sentence the note was anchored to.
+    private func notesBySentenceId(_ sentences: [TranscriptSentence]) -> [Int: [ServerNote]] {
+        guard let epId = state.live?.serverEpisodeId,
+              let notes = state.notesByEpisode[epId], !notes.isEmpty,
+              !sentences.isEmpty
+        else { return [:] }
+        var out: [Int: [ServerNote]] = [:]
+        for note in notes {
+            let t = note.positionSeconds
+            var lo = 0, hi = sentences.count - 1, idx = 0
+            while lo <= hi {
+                let mid = (lo + hi) >> 1
+                if sentences[mid].start <= t {
+                    idx = mid
+                    lo = mid + 1
+                } else {
+                    hi = mid - 1
+                }
+            }
+            out[sentences[idx].id, default: []].append(note)
+        }
+        return out
+    }
+
     var body: some View {
         let activeIdx = activeSentenceIdx
         let activeWordIdx = activeWordGlobalIdx
         let sentences = state.transcriptSentences
+        let notesById = notesBySentenceId(sentences)
 
         ZStack(alignment: .top) {
             ScrollView(showsIndicators: false) {
@@ -243,7 +270,8 @@ private struct TranscriptScrollView: View {
                             sentence: sentence,
                             isActive: sentence.id == activeIdx,
                             isPast: sentence.id < activeIdx,
-                            activeWordIdx: activeWordIdx
+                            activeWordIdx: activeWordIdx,
+                            notes: notesById[sentence.id] ?? []
                         )
                         .id(sentence.id)
                     }
@@ -327,12 +355,18 @@ private struct SentenceBlock: View {
     let isActive: Bool
     let isPast: Bool
     let activeWordIdx: Int
+    let notes: [ServerNote]
 
     var body: some View {
-        if isActive {
-            activeCard
-        } else {
-            plainParagraph
+        VStack(alignment: .leading, spacing: 10) {
+            if isActive {
+                activeCard
+            } else {
+                plainParagraph
+            }
+            ForEach(notes) { note in
+                NoteAttachment(note: note)
+            }
         }
     }
 
@@ -408,6 +442,41 @@ private struct SentenceBlock: View {
             }
         }
         return out
+    }
+}
+
+/// Yellow note callout rendered under a sentence whose time window
+/// contains a saved note. Uses the same gold as the scrubber bookmark
+/// so the two are visually linked. Tap → seek to the note's anchor.
+private struct NoteAttachment: View {
+    @Environment(AppState.self) private var state
+    let note: ServerNote
+
+    var body: some View {
+        let yellow = Color(red: 1.0, green: 0.84, blue: 0.0)
+        Button {
+            state.seek(note.positionSeconds)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "bookmark.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.black.opacity(0.7))
+                    .padding(.top, 1)
+                Text(note.text)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.black.opacity(0.85))
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(yellow)
+            )
+            .shadow(color: yellow.opacity(0.35), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
     }
 }
 
