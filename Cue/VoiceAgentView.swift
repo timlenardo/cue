@@ -116,7 +116,7 @@ private struct VoiceAgentLiveBody: View {
                 }
             }
             Spacer()
-            CloseButton(palette: palette) { state.resumeAfterVoice() }
+            CloseButton(palette: palette) { state.closeVoiceAgent() }
         }
     }
 
@@ -144,7 +144,7 @@ private struct VoiceAgentEmptyBody: View {
                     }
                 }
                 Spacer()
-                CloseButton(palette: palette) { state.resumeAfterVoice() }
+                CloseButton(palette: palette) { state.closeVoiceAgent() }
             }
 
             Text("Paste a podcast URL on the home screen to load a transcript, then ask Cue about it.")
@@ -173,7 +173,7 @@ private struct VoiceSheetScaffold<Content: View>: View {
             )
             .ignoresSafeArea()
             .contentShape(Rectangle())
-            .onTapGesture { state.resumeAfterVoice() }
+            .onTapGesture { state.closeVoiceAgent() }
 
             VStack(alignment: .leading, spacing: 14) {
                 content()

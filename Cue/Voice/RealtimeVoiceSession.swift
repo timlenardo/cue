@@ -23,7 +23,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "RealtimeVoice")
 ///   5. Tool calls dispatch to `RealtimeTools.dispatch(...)`. Playback
 ///      tools (resume / seek / rewind) are terminal — after sending the
 ///      `function_call_output` we tear down and let
-///      `AppState.resumeAfterVoice()` restart the podcast + wake engine.
+///      `AppState.closeVoiceAgent()` restart the podcast + wake engine.
 ///   6. `stop()` (or an `AVAudioSession.interruptionNotification`) closes
 ///      the peer connection cleanly and restores the podcast's audio
 ///      session config.
@@ -439,7 +439,7 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
             // data channel; otherwise the model logs a "function_call
             // never completed" warning.
             try? await Task.sleep(nanoseconds: 100_000_000)
-            state.resumeAfterVoice()
+            state.closeVoiceAgent()
         case .nonTerminal:
             // Nudge the model to speak its follow-up.
             sendEvent(["type": "response.create"])
