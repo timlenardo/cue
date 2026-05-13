@@ -13,7 +13,8 @@ struct EpisodeArtworkView: View {
     // body re-runs at ~10 Hz (it observes `currentTime` for the progress
     // strip) and library rows can be rebuilt on every scroll diff, so even
     // though the inputs rarely change, recomputing the FNV-1a hash + token
-    // split each render adds up.
+    // split + URL parser each render adds up.
+    private let parsedURL: URL?
     private let monogramText: String
     private let monogramColor: Color
 
@@ -22,13 +23,14 @@ struct EpisodeArtworkView: View {
         self.fallbackTitle = fallbackTitle
         self.size = size
         self.radius = radius
+        self.parsedURL = urlString.flatMap(URL.init(string:))
         self.monogramText = EpisodeArtworkMonogram.text(from: fallbackTitle)
         self.monogramColor = EpisodeArtworkMonogram.color(from: fallbackTitle)
     }
 
     var body: some View {
         Group {
-            if let s = urlString, let url = URL(string: s) {
+            if let url = parsedURL {
                 AsyncImage(url: url, transaction: Transaction(animation: .easeInOut(duration: 0.2))) { phase in
                     switch phase {
                     case .empty:
