@@ -32,7 +32,11 @@ final class WakeWordEngine: @unchecked Sendable {
     /// match. Used by the dev "wake word tracking" toggle to surface what
     /// the mic is hearing in real time. `isHit` is true iff the trigger
     /// regex matched (a real wake-word hit, not just background chatter).
-    var onTranscript: (@MainActor (_ text: String, _ isHit: Bool) -> Void)?
+    /// `levels` carries the peak amplitudes / clip rate observed in the
+    /// audio that produced this transcript — surfaced behind the dev
+    /// "audio levels" toggle. Nil iff no audio was observed since the
+    /// previous inference (rare; basically only the first inference).
+    var onTranscript: (@MainActor (_ text: String, _ isHit: Bool, _ levels: AudioLevelStats?) -> Void)?
 
     enum State { case idle, loading, listening, denied, failed(String) }
     private(set) var state: State = .idle
@@ -103,6 +107,19 @@ final class WakeWordEngine: @unchecked Sendable {
     // audio render thread).
     private let bufLock = NSLock()
     private var rolling = RingBuffer<Float>(capacity: WindowSamples, fill: 0)
+
+    // Per-window audio level stats. Reset each time we dispatch an
+    // inference. Tracked under `bufLock` because they're updated on the
+    // audio render thread (same path as the ring push) and snapshotted
+    // on the same thread when inference dispatches.
+    //
+    // We track pre-gain peak and post-gain pre-clip peak as the two
+    // useful "in distribution?" signals. Post-clip would always cap at
+    // 1.0 and hide the magnitude of overshoot.
+    private var windowPreGainPeak: Float = 0
+    private var windowPostGainPeak: Float = 0
+    private var windowClippedCount: Int = 0
+    private var windowSampleCount: Int = 0
 
     // Mic subscription / resampler.
     private var bufferToken: UUID?
@@ -177,11 +194,18 @@ final class WakeWordEngine: @unchecked Sendable {
     // MARK: - Audio path (audio render thread)
 
     private func handle(buffer: AVAudioPCMBuffer) {
-        let samples = resample(buffer: buffer)
-        guard !samples.isEmpty else { return }
+        let result = resample(buffer: buffer)
+        guard !result.samples.isEmpty else { return }
 
         bufLock.lock()
-        samples.withUnsafeBufferPointer { rolling.pushBack($0) }
+        result.samples.withUnsafeBufferPointer { rolling.pushBack($0) }
+        // Accumulate per-window stats alongside the ring push so the
+        // levels reflect the same audio Whisper will eventually see.
+        // Peaks max(), clip counts and sample counts sum.
+        if result.preGainPeak > windowPreGainPeak { windowPreGainPeak = result.preGainPeak }
+        if result.postGainPeak > windowPostGainPeak { windowPostGainPeak = result.postGainPeak }
+        windowClippedCount += result.clippedCount
+        windowSampleCount += result.samples.count
         let availableCount = rolling.count
         bufLock.unlock()
 
@@ -214,17 +238,32 @@ final class WakeWordEngine: @unchecked Sendable {
 
         bufLock.lock()
         let snapshot = rolling.snapshot()
+        // Snapshot+reset the level stats atomically with the audio
+        // snapshot so the stats describe the audio actually handed to
+        // Whisper, and the next inference window starts fresh.
+        let levels: AudioLevelStats? = windowSampleCount > 0
+            ? AudioLevelStats(
+                preGainPeak: windowPreGainPeak,
+                postGainPeak: windowPostGainPeak,
+                clippedCount: windowClippedCount,
+                sampleCount: windowSampleCount
+            )
+            : nil
+        windowPreGainPeak = 0
+        windowPostGainPeak = 0
+        windowClippedCount = 0
+        windowSampleCount = 0
         bufLock.unlock()
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            await self?.runInference(pipe: pipe, samples: snapshot)
+            await self?.runInference(pipe: pipe, samples: snapshot, levels: levels)
             self?.stateLock.lock()
             self?.inferenceInFlight = false
             self?.stateLock.unlock()
         }
     }
 
-    private func runInference(pipe: WhisperKit, samples: [Float]) async {
+    private func runInference(pipe: WhisperKit, samples: [Float], levels: AudioLevelStats?) async {
         do {
             var opts = DecodingOptions(
                 verbose: false,
@@ -255,7 +294,7 @@ final class WakeWordEngine: @unchecked Sendable {
                 .map { $0.text }
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            await MainActor.run { self.handleTranscript(text) }
+            await MainActor.run { self.handleTranscript(text, levels: levels) }
         } catch {
             let msg = error.localizedDescription
             log.error("whisper transcribe failed: \(msg, privacy: .public)")
@@ -263,7 +302,7 @@ final class WakeWordEngine: @unchecked Sendable {
     }
 
     @MainActor
-    private func handleTranscript(_ text: String) {
+    private func handleTranscript(_ text: String, levels: AudioLevelStats?) {
         // Always log the decoded text so dev can see what the mic
         // is picking up. Whisper emits "(silence)" / "[BLANK_AUDIO]" /
         // empty when nothing speech-like was heard — leave those alone.
@@ -281,7 +320,7 @@ final class WakeWordEngine: @unchecked Sendable {
         let isHit = triggerRegex.firstMatch(in: text, options: [], range: range) != nil
 
         if !text.isEmpty {
-            onTranscript?(text, isHit)
+            onTranscript?(text, isHit, levels)
         }
 
         guard isHit else { return }
@@ -298,7 +337,19 @@ final class WakeWordEngine: @unchecked Sendable {
 
     // MARK: - Resampler (audio render thread)
 
-    private func resample(buffer: AVAudioPCMBuffer) -> [Float] {
+    /// Result of resampling one mic buffer. `samples` are the post-clip
+    /// 16 kHz Float audio handed to the ring; the level fields describe
+    /// what happened during the gain pass so the dev "audio levels"
+    /// toggle can verify Whisper is being fed audio in its training
+    /// distribution.
+    private struct ResampleResult {
+        let samples: [Float]
+        let preGainPeak: Float    // max |raw|, before gain
+        let postGainPeak: Float   // max |raw * gain|, before the ±1.0 clip
+        let clippedCount: Int     // samples whose post-gain magnitude ≥ 1.0
+    }
+
+    private func resample(buffer: AVAudioPCMBuffer) -> ResampleResult {
         let bufFormat = buffer.format
         convertLock.lock()
         if sourceFormat?.sampleRate != bufFormat.sampleRate
@@ -310,7 +361,7 @@ final class WakeWordEngine: @unchecked Sendable {
                 interleaved: false
             ) else {
                 convertLock.unlock()
-                return []
+                return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
             }
             sourceFormat = bufFormat
             targetFormat = target
@@ -319,14 +370,16 @@ final class WakeWordEngine: @unchecked Sendable {
         }
         guard let converter, let target = targetFormat else {
             convertLock.unlock()
-            return []
+            return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
         }
         convertLock.unlock()
 
         let outCapacity = AVAudioFrameCount(
             Double(buffer.frameLength) * target.sampleRate / bufFormat.sampleRate + 64
         )
-        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return [] }
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else {
+            return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
+        }
         var error: NSError?
         var fed = false
         let status = converter.convert(to: out, error: &error) { _, status in
@@ -337,20 +390,38 @@ final class WakeWordEngine: @unchecked Sendable {
         }
         guard status != .error, let channelData = out.floatChannelData?[0] else {
             if let error { log.error("convert: \(error.localizedDescription, privacy: .public)") }
-            return []
+            return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
         }
         // Apply software gain on the way out. VPIO's AGC tends to leave
         // float samples peaking far below ±1.0; this gives Whisper the
         // full-range audio its training distribution expects. Clip
         // hard at ±1.0 to keep loud audio from wrapping.
+        //
+        // Track pre-gain and post-gain-pre-clip peaks + a clip counter
+        // in the same single pass so the dev audio-levels HUD has zero
+        // extra cost on the audio render thread when the toggle is off.
         let frameCount = Int(out.frameLength)
         var samples = [Float](repeating: 0, count: frameCount)
         let gain = Self.SoftwareGain
+        var preGainPeak: Float = 0
+        var postGainPeak: Float = 0
+        var clippedCount = 0
         for i in 0..<frameCount {
-            let amplified = channelData[i] * gain
+            let raw = channelData[i]
+            let absRaw = abs(raw)
+            if absRaw > preGainPeak { preGainPeak = absRaw }
+            let amplified = raw * gain
+            let absAmp = abs(amplified)
+            if absAmp > postGainPeak { postGainPeak = absAmp }
+            if absAmp >= 1.0 { clippedCount += 1 }
             samples[i] = max(-1.0, min(1.0, amplified))
         }
-        return samples
+        return ResampleResult(
+            samples: samples,
+            preGainPeak: preGainPeak,
+            postGainPeak: postGainPeak,
+            clippedCount: clippedCount
+        )
     }
 }
 #endif

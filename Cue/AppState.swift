@@ -5,6 +5,40 @@ import AVFAudio
 
 enum Tab: String { case listen, library, notes }
 
+/// Peak amplitude / clip-rate snapshot for the audio window that produced
+/// a given wake transcript. Surfaced behind the dev "audio levels" toggle
+/// so we can verify Whisper is getting input in its training distribution
+/// (roughly -10 to -3 dBFS for speech).
+///
+/// Pre-gain = what VPIO handed us; post-gain = what we'd feed Whisper if
+/// we didn't hard-clip at ±1.0. The clip rate tells us how often we are
+/// clipping after the software gain multiplier.
+struct AudioLevelStats: Equatable, Sendable {
+    /// Max |sample| across the window, BEFORE software gain. Linear 0...1.
+    let preGainPeak: Float
+    /// Max |sample * gain| across the window, BEFORE the ±1.0 clip. Can
+    /// exceed 1.0 — that's the whole point of tracking it pre-clip.
+    let postGainPeak: Float
+    /// Number of samples whose post-gain magnitude hit or exceeded 1.0
+    /// (i.e. would be clipped). 0 if the gain is conservative.
+    let clippedCount: Int
+    /// Total samples observed across the window. Used to compute clip rate.
+    let sampleCount: Int
+
+    var clipRate: Double {
+        guard sampleCount > 0 else { return 0 }
+        return Double(clippedCount) / Double(sampleCount)
+    }
+    var preGainDBFS: Double { Self.dBFS(preGainPeak) }
+    var postGainDBFS: Double { Self.dBFS(postGainPeak) }
+
+    /// 20·log10(x), floored at -120 dB so log(0) doesn't return -inf when
+    /// the window was pure silence.
+    static func dBFS(_ x: Float) -> Double {
+        20 * log10(max(Double(x), 1e-6))
+    }
+}
+
 /// One row in the live "what is Whisper hearing right now" toast stack.
 /// Created by `AppState.addWakeTranscript`; auto-removed after 2s.
 struct WakeTranscript: Identifiable, Equatable {
@@ -14,6 +48,11 @@ struct WakeTranscript: Identifiable, Equatable {
     /// Renders a green check next to the text so dev can eyeball at a
     /// glance which transcripts would actually have fired the agent.
     let isHit: Bool
+    /// Audio level stats for the window that produced this transcript.
+    /// Nil when no audio buffers were observed since the last inference
+    /// (e.g. inference fired off the boot-time padding). Rendered only
+    /// when `audioLevelsDebugEnabled` is on.
+    let levels: AudioLevelStats?
 }
 
 enum LoadPhase: Equatable {
@@ -174,6 +213,27 @@ final class AppState {
         UserDefaults.standard.set(v, forKey: audioSessionDebugKey)
     }
 
+    /// Dev toggle: when on, the wake-word transcript toasts include the
+    /// peak amplitudes (pre-gain → post-gain pre-clip, in dBFS) and the
+    /// clip-rate of the audio window. Lets us verify the 3× software gain
+    /// is landing us in Whisper's training distribution.
+    /// Only meaningful when `wakeTrackingEnabled` is also on — the levels
+    /// piggyback on the wake transcript toasts. Persisted across launches.
+    var audioLevelsDebugEnabled: Bool = AppState.loadAudioLevelsDebug() {
+        didSet {
+            guard oldValue != audioLevelsDebugEnabled else { return }
+            AppState.saveAudioLevelsDebug(audioLevelsDebugEnabled)
+        }
+    }
+
+    private static let audioLevelsDebugKey = "cue.audioLevelsDebug"
+    private static func loadAudioLevelsDebug() -> Bool {
+        UserDefaults.standard.bool(forKey: audioLevelsDebugKey)
+    }
+    private static func saveAudioLevelsDebug(_ v: Bool) {
+        UserDefaults.standard.set(v, forKey: audioLevelsDebugKey)
+    }
+
     var currentTime: Double = 0
     var playing: Bool = false
     var speedIdx: Int = AppState.loadSpeedIdx() {
@@ -252,8 +312,8 @@ final class AppState {
         #endif
 
         wake.onDetect = { [weak self] in self?.openVoiceAgent() }
-        wake.onTranscript = { [weak self] text, isHit in
-            self?.addWakeTranscript(text, isHit: isHit)
+        wake.onTranscript = { [weak self] text, isHit, levels in
+            self?.addWakeTranscript(text, isHit: isHit, levels: levels)
         }
 
         // Mirror AudioPlayer's time + playing state into AppState so the
@@ -341,14 +401,18 @@ final class AppState {
     /// (same text as the most recent toast still on screen) are coalesced
     /// — Whisper's 2s rolling window emits the same utterance ~4-8 times in
     /// a row, and showing each repeat would flood the stack.
-    func addWakeTranscript(_ text: String, isHit: Bool) {
+    func addWakeTranscript(_ text: String, isHit: Bool, levels: AudioLevelStats?) {
         guard wakeTrackingEnabled else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // Coalesce only on text + isHit — levels fluctuate window-to-window
+        // even for identical text, but updating them on a held toast would
+        // cause flicker. The first window's levels stay until the toast
+        // ages out 2s later.
         if let last = wakeTranscripts.last, last.text == trimmed, last.isHit == isHit {
             return
         }
-        let toast = WakeTranscript(text: trimmed, isHit: isHit)
+        let toast = WakeTranscript(text: trimmed, isHit: isHit, levels: levels)
         withAnimation(.easeOut(duration: 0.18)) {
             wakeTranscripts.append(toast)
         }
