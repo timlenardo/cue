@@ -81,13 +81,25 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         RTCInitializeSSL()
     }()
 
+    /// Custom WebRTC audio device — pulls mic samples from MicCapture's
+    /// AVAudioEngine and plays inbound audio back through the same engine.
+    /// POC for the unified pipeline; supersedes WebRTC's default ADM so
+    /// there's one input HAL owner across all audio surfaces.
+    private let audioDevice: CueAudioDevice
+
     init(api: CueAPI, state: AppState) {
         _ = Self.sslInit
         self.api = api
         self.state = state
         let enc = RTCDefaultVideoEncoderFactory()
         let dec = RTCDefaultVideoDecoderFactory()
-        self.factory = RTCPeerConnectionFactory(encoderFactory: enc, decoderFactory: dec)
+        let device = CueAudioDevice()
+        self.audioDevice = device
+        self.factory = RTCPeerConnectionFactory(
+            encoderFactory: enc,
+            decoderFactory: dec,
+            audioDevice: device
+        )
         super.init()
         startLevelMetering()
     }
@@ -174,7 +186,11 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
             }
 
             try setupPeerConnection()
-            configureAudioSessionForWebRTC()
+            // POC: skip `configureAudioSessionForWebRTC` — the custom
+            // RTCAudioDevice replaces WebRTC's default ADM entirely, so
+            // WebRTC isn't operating its own audio unit and has no reason
+            // to touch the session config. MicCapture owns category/mode/
+            // VPIO; WebRTC reads/writes PCM via our ADM only.
             registerInterruptionObserver()
             try await performSDPExchange(ephemeralToken: resp.value)
 
@@ -233,28 +249,6 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         }
         dc.delegate = self
         self.dataChannel = dc
-    }
-
-    private func configureAudioSessionForWebRTC() {
-        // .videoChat + .defaultToSpeaker matches the podcast player's route
-        // policy: loud speaker when nothing else is connected, but iOS
-        // routes to wired earphones / Bluetooth / AirPlay automatically
-        // when they are. Do NOT call overrideOutputAudioPort(.speaker) —
-        // that forces the loudspeaker even with headphones plugged in.
-        let webRTCConfig = RTCAudioSessionConfiguration.webRTC()
-        webRTCConfig.category = AVAudioSession.Category.playAndRecord.rawValue
-        webRTCConfig.categoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay, .defaultToSpeaker]
-        webRTCConfig.mode = AVAudioSession.Mode.videoChat.rawValue
-        RTCAudioSessionConfiguration.setWebRTC(webRTCConfig)
-
-        let session = RTCAudioSession.sharedInstance()
-        session.lockForConfiguration()
-        defer { session.unlockForConfiguration() }
-        do {
-            try session.setConfiguration(webRTCConfig, active: true)
-        } catch {
-            log.error("RTCAudioSession config failed: \(error.localizedDescription, privacy: .public)")
-        }
     }
 
     private func registerInterruptionObserver() {
@@ -484,16 +478,13 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         peerConnection = nil
         pendingContextMessage = nil
 
-        // Restore AudioPlayer's preferred config so the podcast can
-        // resume cleanly through the speaker without WebRTC's voiceChat
-        // mode lingering.
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(
-            .playAndRecord,
-            mode: .spokenAudio,
-            options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP]
-        )
-        try? session.setActive(true)
+        // POC: do NOT reconfigure the AVAudioSession here. With the custom
+        // RTCAudioDevice (CueAudioDevice), MicCapture owns the session
+        // category/mode/VPIO for the entire playback lifetime. Resetting
+        // to `.spokenAudio` here would override MicCapture's `.voiceChat`
+        // and leave the still-running VPIO engine under a stale config
+        // until the next route change forces a bringUpEngine. WebRTC's
+        // own audio unit is not active so it has nothing to clean up.
     }
 }
 

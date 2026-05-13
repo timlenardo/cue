@@ -70,6 +70,20 @@ final class MicCapture {
     /// built-in speaker (the only route with an acoustic echo path).
     private var voiceProcessingActive: Bool = false
 
+    /// Output sources (e.g. WebRTC's playback path) waiting to be attached
+    /// to `engine.mainMixerNode`. Survives engine rebuilds — every time
+    /// the engine is recreated, we re-attach each entry. Kept as a dict
+    /// keyed by ObjectIdentifier so callers can detach by node reference.
+    private var registeredOutputSources: [ObjectIdentifier: (node: AVAudioSourceNode, format: AVAudioFormat)] = [:]
+
+    /// Fires once after every successful `bringUpEngine` (initial start,
+    /// route change, interruption recovery). Subscribers (e.g. WebRTC's
+    /// custom ADM) use this to invalidate any per-engine assumptions —
+    /// most importantly to call `notifyAudioInputInterrupted` on their
+    /// delegate so the framework knows the audio render thread may have
+    /// shifted.
+    @MainActor var onEngineRebuild: (@MainActor () -> Void)?
+
     private init() {
         permission = currentPermission()
         installInterruptionObserver()
@@ -157,6 +171,17 @@ final class MicCapture {
     /// known volume-headroom side effect — that's the tradeoff for
     /// having the mic not hear the podcast.
     private func bringUpEngine() {
+        print("[MicCapture] bringUpEngine — registeredOutputSources count = \(registeredOutputSources.count)")
+        // Detach any previously-registered output sources from the current
+        // engine BEFORE we replace it. AVAudioEngine treats a node attached
+        // to two engine instances as undefined behavior — typically a crash
+        // on the next render tick — and just letting the old engine fall
+        // out of scope doesn't reliably detach in time.
+        for entry in registeredOutputSources.values {
+            engine.disconnectNodeOutput(entry.node)
+            engine.detach(entry.node)
+        }
+
         let wantVP = shouldUseVoiceProcessing()
 
         // Session: switch to `.voiceChat` when we want AEC; force speaker
@@ -215,6 +240,21 @@ final class MicCapture {
                 return
             }
             format = queried
+            // Wire mainMixer → output even when VPIO is off so any
+            // registered output source (e.g. WebRTC TTS playback) has a
+            // path to the speaker. AVAudioEngine doesn't auto-wire this
+            // unless mainMixerNode is touched, and even then the timing
+            // is fragile.
+            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: format)
+        }
+
+        // Re-attach any output sources registered before this engine was
+        // built (e.g. CueAudioDevice's WebRTC playback node). Each engine
+        // rebuild — initial start, route change, interruption recovery —
+        // discards prior node attachments, so we re-wire them here.
+        for entry in registeredOutputSources.values {
+            engine.attach(entry.node)
+            engine.connect(entry.node, to: engine.mainMixerNode, format: entry.format)
         }
 
         currentFormat = format
@@ -233,6 +273,10 @@ final class MicCapture {
             try engine.start()
             isCapturing = true
             print("[MicCapture] started — \(Int(format.sampleRate))Hz, \(format.channelCount)ch, vp=\(voiceProcessingActive)")
+            // Fire AFTER engine.start succeeds, so subscribers can rely on
+            // the engine being live (e.g., re-attached source nodes are
+            // already producing samples from the new audio render thread).
+            onEngineRebuild?()
         } catch {
             print("[MicCapture] engine.start() failed: \(error)")
             input.removeTap(onBus: 0)
@@ -241,6 +285,16 @@ final class MicCapture {
     }
 
     private func tearDownEngine() {
+        print("[MicCapture] tearDownEngine — isCapturing=\(isCapturing), registeredOutputSources count=\(registeredOutputSources.count)")
+        // Detach any registered output sources from this engine before it
+        // goes out of scope. Without this, the source node stays attached
+        // to a stopped-but-not-yet-deallocated engine; the next bringUpEngine
+        // then tries to attach it to a fresh engine and AVAudioEngine treats
+        // "node attached to two engines" as a crash on the next render tick.
+        for entry in registeredOutputSources.values {
+            engine.disconnectNodeOutput(entry.node)
+            engine.detach(entry.node)
+        }
         if isCapturing {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -248,6 +302,32 @@ final class MicCapture {
         }
         currentFormat = nil
         voiceProcessingActive = false
+    }
+
+    // MARK: - Output sources (WebRTC TTS playback)
+
+    /// Register an output source node to be mixed into `mainMixerNode` and
+    /// driven through the engine's output (incl. VPIO when active).
+    /// Idempotent: re-registering the same node is a no-op.
+    ///
+    /// If the engine is currently running, the node is attached + connected
+    /// immediately. If not, it's stored and attached on the next engine
+    /// rebuild (start/route-change/interruption recovery).
+    func registerOutputSource(_ node: AVAudioSourceNode, format: AVAudioFormat) {
+        registeredOutputSources[ObjectIdentifier(node)] = (node, format)
+        if isCapturing {
+            engine.attach(node)
+            engine.connect(node, to: engine.mainMixerNode, format: format)
+        }
+    }
+
+    /// Unregister and disconnect a previously-registered output source.
+    func unregisterOutputSource(_ node: AVAudioSourceNode) {
+        registeredOutputSources.removeValue(forKey: ObjectIdentifier(node))
+        if isCapturing {
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+        }
     }
 
     private func shouldUseVoiceProcessing() -> Bool {

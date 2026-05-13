@@ -168,37 +168,56 @@ final class AppState: ObservableObject {
 
     // MARK: - Wake-word arming
     //
-    // The wake engine listens whenever the full PlayerView is on screen with
-    // an episode loaded and the voice agent isn't already up — regardless of
-    // play/pause. Scene phase is mirrored from RootView.
+    // Simple rule: MicCapture + WakeWordEngine run as long as an episode
+    // is loaded. Both stay alive through:
+    //   - background / lock-screen (driving with a locked phone: user
+    //     should be able to say "qq" / "cue cue" and trigger voice mode
+    //     without unlocking)
+    //   - SwiftUI scenePhase flapping on innocuous events
+    //   - mini-player vs full-player view changes
+    //
+    // The wake engine pauses only while voice mode is open, so the AI's
+    // TTS doesn't re-trigger a wake during its own response.
+    //
+    // `UIBackgroundModes: audio` (set in Info.plist) is what lets iOS
+    // allow the mic to keep recording in background.
 
-    /// Called by RootView on scene-phase transitions.
+    /// Kept for future scene-phase-aware features (none currently). Wake
+    /// detection deliberately ignores scene phase so it works on a locked
+    /// phone.
     func sceneDidChange(active: Bool) {
         scenePhaseActive = active
-        updateWakeArmed()
     }
 
-    /// Recompute whether the wake engine should be listening and reconcile
-    /// MicCapture + WakeWordEngine to that state. Idempotent.
+    /// Reconcile MicCapture + WakeWordEngine to the current state.
+    /// Idempotent. Called from any transition that changes `live` or
+    /// `voiceOpen`.
     private func updateWakeArmed() {
-        let shouldArm = live != nil && playerOpen && !voiceOpen && scenePhaseActive
-        guard shouldArm != micArmedForWake else { return }
-        micArmedForWake = shouldArm
-        wakeArmed = shouldArm
+        let shouldRunMic = live != nil
+        let shouldArmWake = shouldRunMic && !voiceOpen
 
-        if shouldArm {
-            Task { @MainActor in
-                if MicCapture.shared.currentPermission() == .undetermined {
-                    await MicCapture.shared.requestPermission()
+        if shouldRunMic != micArmedForWake {
+            micArmedForWake = shouldRunMic
+            if shouldRunMic {
+                Task { @MainActor in
+                    if MicCapture.shared.currentPermission() == .undetermined {
+                        await MicCapture.shared.requestPermission()
+                    }
+                    guard self.micArmedForWake else { return }
+                    MicCapture.shared.start()
                 }
-                // Re-check — we may have been disarmed during the await.
-                guard self.micArmedForWake else { return }
-                MicCapture.shared.start()
-                self.wake.start()
+            } else {
+                MicCapture.shared.stop()
             }
-        } else {
-            wake.stop()
-            MicCapture.shared.stop()
+        }
+
+        if shouldArmWake != wakeArmed {
+            wakeArmed = shouldArmWake
+            if shouldArmWake {
+                wake.start()
+            } else {
+                wake.stop()
+            }
         }
     }
 
