@@ -1,10 +1,12 @@
 import SwiftUI
+import AVFAudio
 
 struct ContentView: View {
     @Environment(AppState.self) private var state
     @Environment(CueAPI.self) private var api
 
     var body: some View {
+        @Bindable var state = state
         let palette = state.palette
 
         ZStack {
@@ -37,10 +39,104 @@ struct ContentView: View {
                     .transition(.move(edge: .bottom))
                     .zIndex(30)
             }
+
+            // Dev wake-word transcript toasts. Above everything (including
+            // the player). Non-interactive so it never blocks taps.
+            WakeTranscriptOverlay()
+                .allowsHitTesting(false)
+                .zIndex(40)
+
+            // Dev AVAudioSession HUD — top-leading so it doesn't collide
+            // with the wake toasts at center. Polls every 0.5s.
+            if state.audioSessionDebugEnabled {
+                AudioSessionDebugHUD()
+                    .allowsHitTesting(false)
+                    .zIndex(41)
+            }
         }
         .animation(.easeOut(duration: 0.28), value: state.tab)
         .animation(.easeOut(duration: 0.28), value: state.playerOpen)
         .animation(.easeOut(duration: 0.22), value: state.live != nil)
+        .sheet(isPresented: $state.settingsOpen) {
+            SettingsView().environment(state)
+        }
+    }
+}
+
+// MARK: - Wake-word transcript toast overlay
+
+private struct WakeTranscriptOverlay: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(state.wakeTranscripts) { toast in
+                HStack(spacing: 8) {
+                    Text(toast.text)
+                        .font(Fonts.sans(14, weight: .medium))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                    if toast.isHit {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color(hex: "34C759"))
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule().fill(Color.black.opacity(0.6))
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .animation(.easeInOut(duration: 0.2), value: state.wakeTranscripts)
+    }
+}
+
+// MARK: - AVAudioSession debug HUD
+
+private struct AudioSessionDebugHUD: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+            let session = AVAudioSession.sharedInstance()
+            let mode = Self.modeLabel(session.mode)
+            #if os(iOS)
+            let vp = MicCapture.shared.isVoiceProcessingActive
+            #else
+            let vp = false
+            #endif
+            VStack(alignment: .leading, spacing: 2) {
+                Text("mode: \(mode)")
+                Text("VPIO: \(vp ? "on" : "off")")
+            }
+            .font(Fonts.mono(11, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black.opacity(0.6))
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.top, Geo.statusBarReserve + 4)
+            .padding(.leading, 12)
+        }
+    }
+
+    /// Strip the "AVAudioSessionMode" prefix off the raw mode string so the
+    /// HUD reads as "voiceChat" / "spokenAudio" rather than a long Obj-C
+    /// constant. Falls back to the raw value for any future mode we don't
+    /// branch on explicitly.
+    private static func modeLabel(_ mode: AVAudioSession.Mode) -> String {
+        let raw = mode.rawValue
+        let prefix = "AVAudioSessionMode"
+        guard raw.hasPrefix(prefix) else { return raw }
+        let stripped = raw.dropFirst(prefix.count)
+        guard let first = stripped.first else { return "default" }
+        return first.lowercased() + stripped.dropFirst()
     }
 }
 

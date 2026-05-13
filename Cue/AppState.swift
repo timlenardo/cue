@@ -5,6 +5,17 @@ import AVFAudio
 
 enum Tab: String { case listen, library, notes }
 
+/// One row in the live "what is Whisper hearing right now" toast stack.
+/// Created by `AppState.addWakeTranscript`; auto-removed after 2s.
+struct WakeTranscript: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    /// True when the transcript matched the wake-word trigger regex.
+    /// Renders a green check next to the text so dev can eyeball at a
+    /// glance which transcripts would actually have fired the agent.
+    let isHit: Bool
+}
+
 enum LoadPhase: Equatable {
     case idle
     case resolving
@@ -119,6 +130,50 @@ final class AppState {
     /// (e.g. a "listening" indicator on the mic button).
     private(set) var wakeArmed: Bool = false
 
+    /// Settings sheet visibility, driven by the gear button in EntryView.
+    var settingsOpen: Bool = false
+
+    /// Dev toggle: when on, force-arm the wake engine (regardless of whether
+    /// an episode is loaded) and surface every Whisper transcript as a toast
+    /// over the app via `wakeTranscripts`. Persisted across launches.
+    var wakeTrackingEnabled: Bool = AppState.loadWakeTracking() {
+        didSet {
+            guard oldValue != wakeTrackingEnabled else { return }
+            AppState.saveWakeTracking(wakeTrackingEnabled)
+            if !wakeTrackingEnabled { wakeTranscripts.removeAll() }
+            updateWakeArmed()
+        }
+    }
+
+    /// Live list of in-flight transcript toasts. Each entry self-dismisses
+    /// after 2s; the UI renders the array in render order, stacked.
+    var wakeTranscripts: [WakeTranscript] = []
+
+    private static let wakeTrackingKey = "cue.wakeTracking"
+    private static func loadWakeTracking() -> Bool {
+        UserDefaults.standard.bool(forKey: wakeTrackingKey)
+    }
+    private static func saveWakeTracking(_ v: Bool) {
+        UserDefaults.standard.set(v, forKey: wakeTrackingKey)
+    }
+
+    /// Dev toggle: when on, render a small HUD with the live AVAudioSession
+    /// mode and VPIO state. Persisted across launches.
+    var audioSessionDebugEnabled: Bool = AppState.loadAudioSessionDebug() {
+        didSet {
+            guard oldValue != audioSessionDebugEnabled else { return }
+            AppState.saveAudioSessionDebug(audioSessionDebugEnabled)
+        }
+    }
+
+    private static let audioSessionDebugKey = "cue.audioSessionDebug"
+    private static func loadAudioSessionDebug() -> Bool {
+        UserDefaults.standard.bool(forKey: audioSessionDebugKey)
+    }
+    private static func saveAudioSessionDebug(_ v: Bool) {
+        UserDefaults.standard.set(v, forKey: audioSessionDebugKey)
+    }
+
     var currentTime: Double = 0
     var playing: Bool = false
     var speedIdx: Int = AppState.loadSpeedIdx() {
@@ -197,6 +252,9 @@ final class AppState {
         #endif
 
         wake.onDetect = { [weak self] in self?.openVoiceAgent() }
+        wake.onTranscript = { [weak self] text, isHit in
+            self?.addWakeTranscript(text, isHit: isHit)
+        }
 
         // Mirror AudioPlayer's time + playing state into AppState so the
         // transcript / progress views update reactively. `AudioPlayer`
@@ -248,6 +306,11 @@ final class AppState {
                 )
             }
             .store(in: &audioSubs)
+
+        // If the dev wake-tracking toggle is on from a prior launch, arm the
+        // engine immediately — without this, the toggle silently does
+        // nothing until the user loads a podcast or flips it off and on.
+        if wakeTrackingEnabled { updateWakeArmed() }
     }
 
     // MARK: - Wake-word arming
@@ -273,11 +336,39 @@ final class AppState {
         scenePhaseActive = active
     }
 
+    /// Push a transcript into the toast stack and schedule its 2s removal.
+    /// No-op when the dev tracking toggle is off. Consecutive duplicates
+    /// (same text as the most recent toast still on screen) are coalesced
+    /// — Whisper's 2s rolling window emits the same utterance ~4-8 times in
+    /// a row, and showing each repeat would flood the stack.
+    func addWakeTranscript(_ text: String, isHit: Bool) {
+        guard wakeTrackingEnabled else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let last = wakeTranscripts.last, last.text == trimmed, last.isHit == isHit {
+            return
+        }
+        let toast = WakeTranscript(text: trimmed, isHit: isHit)
+        withAnimation(.easeOut(duration: 0.18)) {
+            wakeTranscripts.append(toast)
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self else { return }
+            withAnimation(.easeIn(duration: 0.22)) {
+                self.wakeTranscripts.removeAll { $0.id == toast.id }
+            }
+        }
+    }
+
     /// Reconcile MicCapture + WakeWordEngine to the current state.
     /// Idempotent. Called from any transition that changes `live` or
     /// `voiceOpen`.
     private func updateWakeArmed() {
-        let shouldRunMic = live != nil
+        // wakeTrackingEnabled force-arms the engine even when no episode is
+        // loaded, so dev can verify what Whisper is hearing without first
+        // having to start a podcast.
+        let shouldRunMic = live != nil || wakeTrackingEnabled
         let shouldArmWake = shouldRunMic && !voiceOpen
 
         if shouldRunMic != micArmedForWake {

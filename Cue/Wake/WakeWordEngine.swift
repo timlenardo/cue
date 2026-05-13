@@ -28,6 +28,12 @@ final class WakeWordEngine: @unchecked Sendable {
     /// Debounced by `Debounce` seconds.
     var onDetect: (@MainActor () -> Void)?
 
+    /// Fires for every non-empty Whisper transcript, regardless of trigger
+    /// match. Used by the dev "wake word tracking" toggle to surface what
+    /// the mic is hearing in real time. `isHit` is true iff the trigger
+    /// regex matched (a real wake-word hit, not just background chatter).
+    var onTranscript: (@MainActor (_ text: String, _ isHit: Bool) -> Void)?
+
     enum State { case idle, loading, listening, denied, failed(String) }
     private(set) var state: State = .idle
 
@@ -272,7 +278,13 @@ final class WakeWordEngine: @unchecked Sendable {
         }
 
         let range = NSRange(text.startIndex..., in: text)
-        guard triggerRegex.firstMatch(in: text, options: [], range: range) != nil else { return }
+        let isHit = triggerRegex.firstMatch(in: text, options: [], range: range) != nil
+
+        if !text.isEmpty {
+            onTranscript?(text, isHit)
+        }
+
+        guard isHit else { return }
 
         let now = Date()
         if now.timeIntervalSince(lastFireAt) < Self.Debounce {
