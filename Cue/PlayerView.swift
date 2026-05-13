@@ -392,17 +392,23 @@ private struct ProgressBar: View {
                         )
                         .frame(height: 22)
                     } else {
-                        Capsule()
-                            .fill(Ambient.accent)
-                            .frame(width: max(4, w * CGFloat(pct)), height: 4)
-                            .frame(maxHeight: .infinity, alignment: .center)
-                            .shadow(color: Ambient.accentGlow.opacity(0.45), radius: 8)
+                        // Opacity-gated so phase 1 of openVoiceAgent()
+                        // can fade the dot + green fill out *before*
+                        // morphActive flips and the waveform takes over.
+                        Group {
+                            Capsule()
+                                .fill(Ambient.accent)
+                                .frame(width: max(4, w * CGFloat(pct)), height: 4)
+                                .frame(maxHeight: .infinity, alignment: .center)
+                                .shadow(color: Ambient.accentGlow.opacity(0.45), radius: 8)
 
-                        Circle()
-                            .fill(.white)
-                            .frame(width: 14, height: 14)
-                            .shadow(color: .white.opacity(0.7), radius: 8)
-                            .offset(x: w * CGFloat(pct) - 7)
+                            Circle()
+                                .fill(.white)
+                                .frame(width: 14, height: 14)
+                                .shadow(color: .white.opacity(0.7), radius: 8)
+                                .offset(x: w * CGFloat(pct) - 7)
+                        }
+                        .opacity(state.playbackDetailsVisible ? 1 : 0)
                     }
                 }
                 .frame(height: 22)
@@ -486,12 +492,21 @@ private struct PrimaryControls: View {
 
             Spacer(minLength: 0)
 
-            if morphActive {
-                VoiceOrb(session: state.voiceSession) {
-                    state.resumeAfterVoice()
+            // Instant structural swap: the orb's white core takes over
+            // the play button's footprint with no crossfade. Both views
+            // are 88pt white discs, so the eye reads a continuous
+            // surface. The halo's fade-in is handled inside VoiceOrbCore
+            // via @State + onAppear so only the glow animates.
+            ZStack {
+                if voiceOpen {
+                    VoiceOrb(session: state.voiceSession) {
+                        state.closeVoiceAgent()
+                    }
+                    .transition(.identity)
+                } else {
+                    PlayButton()
+                        .transition(.identity)
                 }
-            } else {
-                PlayButton()
             }
 
             Spacer(minLength: 0)
@@ -538,10 +553,10 @@ private struct PlayButton: View {
                     )
                     .shadow(color: .white.opacity(0.1), radius: 24)
 
-                Image(systemName: state.playing ? "pause.fill" : "play.fill")
+                Image(systemName: state.iconPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 30, weight: .semibold))
                     .foregroundStyle(Ambient.bg)
-                    .offset(x: state.playing ? 0 : 2)
+                    .offset(x: state.iconPlaying ? 0 : 2)
             }
         }
         .buttonStyle(.plain)
@@ -584,7 +599,7 @@ private struct SecondaryRow: View {
             Spacer(minLength: 0)
 
             ListeningPill(playing: state.playing)
-                .onTapGesture { state.openMic() }
+                .onTapGesture { state.openVoiceAgent() }
 
             Spacer(minLength: 0)
 
@@ -729,16 +744,22 @@ private struct VoiceOrbCore: View {
     let level: Float
     let onTap: () -> Void
 
+    // Multiplies into halo opacity and core shadow so only the glow fades
+    // in when the orb first appears. The core disc itself is at full
+    // opacity from frame 0 — the structural swap from PlayButton looks
+    // instant because both are 88pt white discs.
+    @State private var glow: Double = 0
+
     var body: some View {
         Button(action: onTap) {
             ZStack {
-                // Outer halo — soft white glow that breathes with the mic level.
+                // Outer halo — white glow that breathes with the mic level.
                 Circle()
                     .fill(Color.white)
-                    .frame(width: 100, height: 100)
-                    .blur(radius: 18)
-                    .opacity(0.18 + Double(level) * 0.30)
-                    .scaleEffect(1.0 + CGFloat(level) * 0.30)
+                    .frame(width: 120, height: 120)
+                    .blur(radius: 26)
+                    .opacity((0.40 + Double(level) * 0.45) * glow)
+                    .scaleEffect(1.0 + CGFloat(level) * 0.40)
 
                 // Core — same 88pt footprint as the play button at rest, so
                 // the swap doesn't visually shrink the surface. Bounce
@@ -748,20 +769,16 @@ private struct VoiceOrbCore: View {
                     .frame(width: 88, height: 88)
                     .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
                     .scaleEffect(1.0 + CGFloat(level) * 0.20)
-                    .shadow(color: .white.opacity(0.25), radius: 18)
-
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(Ambient.bg)
-                    // Track the core's scale so the icon doesn't visibly
-                    // shrink relative to the body as it bounces.
-                    .scaleEffect(1.0 + CGFloat(level) * 0.20)
+                    .shadow(color: .white.opacity(0.45 * glow), radius: 28)
             }
             .animation(.spring(response: 0.18, dampingFraction: 0.55), value: level)
             .frame(width: 96, height: 96)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.5)) { glow = 1 }
+        }
     }
 }
 

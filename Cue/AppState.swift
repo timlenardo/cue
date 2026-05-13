@@ -32,6 +32,20 @@ final class AppState: ObservableObject {
     /// button → mic orb) so the white scrubber thumb isn't briefly
     /// bisected by the appearing grey track mid-transition.
     @Published var voiceMorphActive: Bool = false
+    /// Drives the play dot, green progress fill, and play icon. Fades to
+    /// false during phase 1 of opening the voice agent, then back to true
+    /// during phase 2 of closing it. Lets the dot + green fade out before
+    /// the waveform takes their slot, killing the bisection on the scrubber.
+    @Published var playbackDetailsVisible: Bool = true
+    /// Snapshot of `playing` at the moment `voiceOpen` flipped true. The
+    /// play button's glyph reads from this while voice mode is open, so
+    /// the pause→play flip caused by `audio.pause()` inside
+    /// `openVoiceAgent` doesn't change the icon mid-transition.
+    @Published var playingAtVoiceOpen: Bool = false
+
+    /// Drives the play button glyph (pause vs play). Mirrors `playing`
+    /// normally; pins to its pre-voiceOpen value while voice mode is open.
+    var iconPlaying: Bool { voiceOpen ? playingAtVoiceOpen : playing }
 
     /// True while the wake-word engine is listening. Drives any UI affordance
     /// (e.g. a "listening" indicator on the mic button).
@@ -114,7 +128,7 @@ final class AppState: ObservableObject {
         }
         #endif
 
-        wake.onDetect = { [weak self] in self?.openMic() }
+        wake.onDetect = { [weak self] in self?.openVoiceAgent() }
 
         // Mirror AudioPlayer's time + playing state into AppState's @Published
         // properties so transcript/progress views update reactively.
@@ -263,21 +277,31 @@ final class AppState: ObservableObject {
         updateWakeArmed()
     }
 
-    func openMic() {
+    func openVoiceAgent() {
+        // Freeze the play button glyph at its current value so the
+        // pause→play flip from `audio.pause()` below doesn't mutate the
+        // icon mid-transition. The play button isn't rendered while
+        // voiceOpen is true, but this keeps the binding clean.
+        playingAtVoiceOpen = playing
+
+        // Phase 1: shade dims (0.32s) and the playback details (scrubber
+        // dot + green fill) fade out (0.25s). By the time phase 2 runs,
+        // the dot is at opacity 0 — so the waveform's appearance can't
+        // visually bisect it.
         withAnimation(.easeOut(duration: 0.32)) { voiceOpen = true }
+        withAnimation(.easeInOut(duration: 0.25)) { playbackDetailsVisible = false }
+
         // Pause podcast while the agent is open.
         if live != nil { audio.pause() }
         // Hand the mic off to the realtime session — wake should not keep
         // tapping the input bus while the agent is on screen.
         updateWakeArmed()
 
-        // Defer the in-place control morph until the shade has fully
-        // covered the player below. Without this lag, the white scrubber
-        // thumb is briefly visible on top of the appearing grey track —
-        // looks like the thumb is bisected mid-transition. 0.32s matches
-        // the shade's animation duration above.
+        // Phase 2: after phase-1 fade-out lands, swap in the waveform.
+        // 270ms = 250ms fade-out + 20ms buffer so the opacity has fully
+        // committed before the structural swap fires.
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 320_000_000)
+            try? await Task.sleep(nanoseconds: 270_000_000)
             guard let self, self.voiceOpen else { return }
             withAnimation(.easeInOut(duration: 0.25)) { self.voiceMorphActive = true }
         }
@@ -301,16 +325,27 @@ final class AppState: ObservableObject {
         )
         Task { await session.start(context: ctx) }
     }
-    func resumeAfterVoice() {
+    func closeVoiceAgent() {
         // Tear the realtime session down first so it stops claiming the
         // mic / restores audio-session config before AudioPlayer resumes.
         voiceSession?.stop()
         voiceSession = nil
 
-        withAnimation(.easeOut(duration: 0.25)) {
-            voiceOpen = false
-            voiceMorphActive = false
+        // Phase 1 (reversed): waveform fades out. The shade and playback
+        // details stay put during this phase.
+        withAnimation(.easeInOut(duration: 0.25)) { voiceMorphActive = false }
+
+        // Phase 2 (reversed): once the waveform is gone, lift the shade
+        // and fade the playback details back in.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 270_000_000)
+            guard let self else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                self.voiceOpen = false
+                self.playbackDetailsVisible = true
+            }
         }
+
         if live != nil { audio.play(); audio.setRate(Float(speed)) }
         else { playing = true }
         // Re-arm wake after a brief delay so the tail of the realtime
