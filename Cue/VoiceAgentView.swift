@@ -94,8 +94,6 @@ private struct VoiceAgentLiveBody: View {
                     .foregroundStyle(palette.inkMuted)
                     .multilineTextAlignment(.leading)
             }
-
-            bottomRow(palette: palette)
         }
     }
 
@@ -122,28 +120,6 @@ private struct VoiceAgentLiveBody: View {
         }
     }
 
-    @ViewBuilder
-    private func bottomRow(palette: Palette) -> some View {
-        HStack {
-            HStack(spacing: 6) {
-                PausedDot(active: phase != .done && phase != .error, accent: palette.accent)
-                Text("Podcast paused")
-                    .font(Fonts.sans(12))
-                    .foregroundStyle(palette.inkMuted)
-            }
-            Spacer()
-            Button { state.resumeAfterVoice() } label: {
-                Text("Resume podcast")
-                    .font(Fonts.sans(13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Capsule().fill(palette.accent))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.top, 4)
-    }
 }
 
 // MARK: - Empty body (no live episode loaded)
@@ -215,7 +191,10 @@ private struct VoiceSheetScaffold<Content: View>: View {
                     .shadow(color: .black.opacity(0.18), radius: 12, y: 6)
             )
             .padding(.horizontal, 12)
-            .padding(.bottom, 130)
+            // Bottom strip in PlayerView is ~240pt tall (gradient + scrubber +
+            // controls + secondary row). Pushing the card above it keeps the
+            // scrubber + voice orb visible without overlap.
+            .padding(.bottom, 280)
         }
     }
 }
@@ -272,21 +251,6 @@ private struct ThinkingDots: View {
         }
         .padding(.leading, 6)
         .onAppear { bounce = true }
-    }
-}
-
-private struct PausedDot: View {
-    let active: Bool
-    let accent: Color
-    @State private var pulse = false
-    var body: some View {
-        Circle()
-            .fill(accent)
-            .frame(width: 6, height: 6)
-            .opacity(active ? (pulse ? 0.4 : 1.0) : 0.4)
-            .scaleEffect(active ? (pulse ? 0.75 : 1.0) : 1.0)
-            .animation(active ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: pulse)
-            .onAppear { pulse = true }
     }
 }
 

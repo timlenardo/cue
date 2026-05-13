@@ -27,6 +27,11 @@ final class AppState: ObservableObject {
     @Published var tab: Tab = .listen
     @Published var playerOpen: Bool = false
     @Published var voiceOpen: Bool = false
+    /// Lags `voiceOpen` by the shade's animation duration on open. Used to
+    /// gate the in-place control morph (scrubber fill → waveform, play
+    /// button → mic orb) so the white scrubber thumb isn't briefly
+    /// bisected by the appearing grey track mid-transition.
+    @Published var voiceMorphActive: Bool = false
 
     /// True while the wake-word engine is listening. Drives any UI affordance
     /// (e.g. a "listening" indicator on the mic button).
@@ -266,6 +271,17 @@ final class AppState: ObservableObject {
         // tapping the input bus while the agent is on screen.
         updateWakeArmed()
 
+        // Defer the in-place control morph until the shade has fully
+        // covered the player below. Without this lag, the white scrubber
+        // thumb is briefly visible on top of the appearing grey track —
+        // looks like the thumb is bisected mid-transition. 0.32s matches
+        // the shade's animation duration above.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            guard let self, self.voiceOpen else { return }
+            withAnimation(.easeInOut(duration: 0.25)) { self.voiceMorphActive = true }
+        }
+
         // Spin up a real OpenAI Realtime session whenever we have a live
         // episode. Without `live` there's no audioUrl / transcript to mint
         // a session against, so we leave voiceSession nil and let the view
@@ -291,7 +307,10 @@ final class AppState: ObservableObject {
         voiceSession?.stop()
         voiceSession = nil
 
-        withAnimation(.easeOut(duration: 0.25)) { voiceOpen = false }
+        withAnimation(.easeOut(duration: 0.25)) {
+            voiceOpen = false
+            voiceMorphActive = false
+        }
         if live != nil { audio.play(); audio.setRate(Float(speed)) }
         else { playing = true }
         // Re-arm wake after a brief delay so the tail of the realtime

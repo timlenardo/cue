@@ -49,6 +49,18 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     @Published private(set) var assistantTranscript: String = ""
     @Published private(set) var errorMessage: String?
 
+    /// Smoothed 0..1 amplitude of the user's mic, sourced from the WebRTC
+    /// `media-source` audio-level stat (pre-encoding). Drives the play-button
+    /// orb bounce in voice mode.
+    @Published private(set) var inputLevel: Float = 0
+    /// Smoothed 0..1 amplitude of the assistant's TTS, sourced from the
+    /// WebRTC `inbound-rtp` audio-level stat. Stays at 0 whenever the
+    /// receiver isn't actually delivering audio frames, which lets the
+    /// oscilloscope go flat between turns.
+    @Published private(set) var outputLevel: Float = 0
+
+    private var levelTimer: AnyCancellable?
+
     private let api: CueAPI
     private weak var state: AppState?
 
@@ -77,12 +89,60 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         let dec = RTCDefaultVideoDecoderFactory()
         self.factory = RTCPeerConnectionFactory(encoderFactory: enc, decoderFactory: dec)
         super.init()
+        startLevelMetering()
     }
 
     deinit {
         if let obs = interruptionObserver {
             NotificationCenter.default.removeObserver(obs)
         }
+    }
+
+    /// Polls `peerConnection.statistics` at ~20Hz and pulls audioLevel
+    /// out of the `media-source` (mic) and `inbound-rtp` (assistant) stats.
+    /// Empty / disconnected state decays both levels to 0.
+    private func startLevelMetering() {
+        levelTimer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.pollLevels() }
+    }
+
+    private func pollLevels() {
+        guard let pc = peerConnection else {
+            applyLevels(input: 0, output: 0)
+            return
+        }
+        pc.statistics { [weak self] report in
+            var input: Float = 0
+            var output: Float = 0
+            for (_, stat) in report.statistics {
+                // Only consider audio stats; `kind` is the modern key, but
+                // some builds emit `mediaType` instead.
+                let kind = (stat.values["kind"] as? String)
+                    ?? (stat.values["mediaType"] as? String)
+                guard kind == "audio" else { continue }
+                guard let level = (stat.values["audioLevel"] as? NSNumber)?.floatValue else { continue }
+                switch stat.type {
+                case "media-source":
+                    input = max(input, level)
+                case "inbound-rtp":
+                    output = max(output, level)
+                default:
+                    break
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.applyLevels(input: input, output: output)
+            }
+        }
+    }
+
+    /// One-pole low-pass into the published levels so the UI breathes
+    /// instead of strobing on every 20Hz tick.
+    private func applyLevels(input: Float, output: Float) {
+        let alpha: Float = 0.4
+        inputLevel  = inputLevel  + (input  - inputLevel)  * alpha
+        outputLevel = outputLevel + (output - outputLevel) * alpha
     }
 
     // MARK: - Public
@@ -414,6 +474,10 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(obs)
             interruptionObserver = nil
         }
+        levelTimer?.cancel()
+        levelTimer = nil
+        inputLevel = 0
+        outputLevel = 0
         dataChannel?.close()
         dataChannel = nil
         peerConnection?.close()

@@ -40,11 +40,26 @@ struct PlayerView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .ignoresSafeArea(edges: .bottom)
+            .opacity(state.voiceOpen ? 0.25 : 1)
+            .allowsHitTesting(!state.voiceOpen)
+            .animation(.easeInOut(duration: 0.25), value: state.voiceOpen)
+
+            // Voice shade — sits above header/transcript so the upper UI
+            // reads as "covered". Bottom controls strip is lifted above this
+            // layer (zIndex 60) so the scrubber + play button punch through.
+            if state.voiceOpen {
+                VoiceAgentView()
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .zIndex(50)
+            }
 
             // Bottom controls: fade region (transcript can show through here)
             // followed by a solid section that owns the progress bar, primary
             // controls, and listening pill. The solid section's bg prevents
             // transcript text from bleeding through the progress track.
+            //
+            // zIndex(60) keeps this strip above the voice shade so the
+            // morphed scrubber + play button stay visible during voice mode.
             VStack(spacing: 0) {
                 LinearGradient(
                     colors: [Ambient.bg.opacity(0), Ambient.bg],
@@ -57,19 +72,24 @@ struct PlayerView: View {
                     ProgressBar()
                     PrimaryControls()
                     SecondaryRow()
+                        .opacity(state.voiceOpen ? 0.15 : 1)
+                        .allowsHitTesting(!state.voiceOpen)
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 4)
                 .padding(.bottom, 12)
+                // Always opaque — even in voice mode — so the dimmed
+                // transcript behind never bleeds through the controls.
                 .background(Ambient.bg)
+                .animation(.easeInOut(duration: 0.25), value: state.voiceOpen)
             }
-
-            if state.voiceOpen {
-                VoiceAgentView()
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    .zIndex(50)
-            }
+            .zIndex(60)
         }
+        // Force full-screen size regardless of when SwiftUI measures during
+        // the .move(edge: .bottom) transition. Without this, the ZStack can
+        // collapse to its content's intrinsic height mid-animation and the
+        // bottom-alignment pins the header to the bottom of the parent.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .preferredColorScheme(.dark)
     }
 }
@@ -296,7 +316,12 @@ private struct SentenceBlock: View {
                 .lineSpacing(8)
                 .foregroundStyle(Ambient.textBody)
                 .multilineTextAlignment(.leading)
-                .padding(16)
+                // Tighter horizontal padding now that the card sits inside
+                // the LazyVStack's 24pt indent (no negative outer padding).
+                // Keeps text visually close to where it sits in plain-
+                // paragraph mode — minimizes the active/inactive jump.
+                .padding(.horizontal, 12)
+                .padding(.vertical, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(
@@ -308,7 +333,6 @@ private struct SentenceBlock: View {
                 )
         )
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .padding(.horizontal, -8)
         .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
         .contentShape(Rectangle())
         .onTapGesture { state.seek(sentence.start) }
@@ -344,9 +368,14 @@ private struct ProgressBar: View {
         let duration = state.totalDuration
         let pct = max(0, min(1, state.currentTime / max(duration, 1)))
         let chapter = state.currentChapter()
+        // Swap visual + gesture run on `voiceMorphActive` (lags the shade)
+        // so the thumb isn't bisected mid-transition. Dim/disable on the
+        // surrounding row runs on `voiceOpen` (immediate, with the shade).
+        let morphActive = state.voiceMorphActive
+        let voiceOpen = state.voiceOpen
 
         VStack(spacing: 10) {
-            // Track + fill + thumb.
+            // Track + fill + thumb (normal mode) OR track + waveform (voice mode).
             GeometryReader { proxy in
                 let w = proxy.size.width
                 ZStack(alignment: .leading) {
@@ -355,21 +384,31 @@ private struct ProgressBar: View {
                         .frame(height: 4)
                         .frame(maxHeight: .infinity, alignment: .center)
 
-                    Capsule()
-                        .fill(Ambient.accent)
-                        .frame(width: max(4, w * CGFloat(pct)), height: 4)
-                        .frame(maxHeight: .infinity, alignment: .center)
-                        .shadow(color: Ambient.accentGlow.opacity(0.45), radius: 8)
+                    if morphActive {
+                        VoiceWaveformBar(
+                            session: state.voiceSession,
+                            color: Ambient.accent,
+                            glow: Ambient.accentGlow
+                        )
+                        .frame(height: 22)
+                    } else {
+                        Capsule()
+                            .fill(Ambient.accent)
+                            .frame(width: max(4, w * CGFloat(pct)), height: 4)
+                            .frame(maxHeight: .infinity, alignment: .center)
+                            .shadow(color: Ambient.accentGlow.opacity(0.45), radius: 8)
 
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 14, height: 14)
-                        .shadow(color: .white.opacity(0.7), radius: 8)
-                        .offset(x: w * CGFloat(pct) - 7)
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 14, height: 14)
+                            .shadow(color: .white.opacity(0.7), radius: 8)
+                            .offset(x: w * CGFloat(pct) - 7)
+                    }
                 }
                 .frame(height: 22)
                 .contentShape(Rectangle())
                 .gesture(
+                    morphActive ? nil :
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             let ratio = max(0, min(1, value.location.x / w))
@@ -378,8 +417,10 @@ private struct ProgressBar: View {
                 )
             }
             .frame(height: 22)
+            .animation(.easeInOut(duration: 0.25), value: morphActive)
 
-            // Time row with centered chapter label.
+            // Time row with centered chapter label. Dimmed in voice mode —
+            // time/chapter are irrelevant while the agent is mid-turn.
             ZStack {
                 HStack {
                     Text(Format.clock(state.currentTime))
@@ -406,6 +447,8 @@ private struct ProgressBar: View {
                         .lineLimit(1)
                 }
             }
+            .opacity(voiceOpen ? 0.15 : 1)
+            .animation(.easeInOut(duration: 0.25), value: voiceOpen)
         }
     }
 }
@@ -416,6 +459,11 @@ private struct PrimaryControls: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
+        // Dim/disable the surrounding controls with the shade (`voiceOpen`).
+        // Swap the centre play button on the delayed `voiceMorphActive`
+        // so the swap happens after the shade has covered the rest.
+        let voiceOpen = state.voiceOpen
+        let morphActive = state.voiceMorphActive
         HStack(spacing: 0) {
             // Speed badge — left.
             Button { state.cycleSpeed() } label: {
@@ -427,18 +475,30 @@ private struct PrimaryControls: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .opacity(voiceOpen ? 0.15 : 1)
+            .allowsHitTesting(!voiceOpen)
 
             Spacer(minLength: 0)
 
             SkipButton(direction: .back) { state.skipBack15() }
+                .opacity(voiceOpen ? 0.15 : 1)
+                .allowsHitTesting(!voiceOpen)
 
             Spacer(minLength: 0)
 
-            PlayButton()
+            if morphActive {
+                VoiceOrb(session: state.voiceSession) {
+                    state.resumeAfterVoice()
+                }
+            } else {
+                PlayButton()
+            }
 
             Spacer(minLength: 0)
 
             SkipButton(direction: .forward) { state.skipFwd15() }
+                .opacity(voiceOpen ? 0.15 : 1)
+                .allowsHitTesting(!voiceOpen)
 
             Spacer(minLength: 0)
 
@@ -451,7 +511,11 @@ private struct PrimaryControls: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .opacity(voiceOpen ? 0.15 : 1)
+            .allowsHitTesting(!voiceOpen)
         }
+        .animation(.easeInOut(duration: 0.25), value: voiceOpen)
+        .animation(.easeInOut(duration: 0.25), value: morphActive)
     }
 }
 
@@ -563,7 +627,7 @@ private struct ListeningPill: View {
             }
             .frame(width: 24, height: 16)
 
-            Text(playing ? "Cue is listening\u{2026}" : "Tap to ask Cue")
+            (Text("Tap or say ") + Text("qq").italic())
                 .font(.system(size: 13, weight: .semibold))
                 .tracking(0.2)
                 .foregroundStyle(Ambient.textPrimary)
@@ -619,5 +683,160 @@ private struct ListeningPill: View {
 
     private func staggerDelay(i: Int) -> Double {
         [0.0, 0.2, 0.4, 0.1][i % 4]
+    }
+}
+
+// MARK: - Voice mode morphs
+//
+// Renderers that replace the play button and the scrubber-bar fill while
+// the voice agent is active. Each takes an optional RealtimeVoiceSession
+// so the parent can swap in/out without conditional types. Audio levels
+// today come from the session's synthetic driver — see the TODOs in
+// RealtimeVoiceSession for the real WebRTC metering path.
+
+/// Voice mode replacement for the play button. Sage-green core that
+/// scales with the active level (mic when listening, TTS when speaking).
+/// Tap = close the voice agent and resume the podcast.
+private struct VoiceOrb: View {
+    let session: RealtimeVoiceSession?
+    let onTap: () -> Void
+
+    var body: some View {
+        Group {
+            if let session {
+                VoiceOrbLive(session: session, onTap: onTap)
+            } else {
+                VoiceOrbCore(level: 0, onTap: onTap)
+            }
+        }
+        .frame(width: 96, height: 96)
+    }
+}
+
+private struct VoiceOrbLive: View {
+    @ObservedObject var session: RealtimeVoiceSession
+    let onTap: () -> Void
+
+    var body: some View {
+        // Mic-only signal: the orb is the user's mouth, never the AI's.
+        // It bounces during .listening and stays still otherwise.
+        let level: Float = session.phase == .listening ? session.inputLevel : 0
+        VoiceOrbCore(level: level, onTap: onTap)
+    }
+}
+
+private struct VoiceOrbCore: View {
+    let level: Float
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            ZStack {
+                // Outer halo — soft white glow that breathes with the mic level.
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 100, height: 100)
+                    .blur(radius: 18)
+                    .opacity(0.18 + Double(level) * 0.30)
+                    .scaleEffect(1.0 + CGFloat(level) * 0.30)
+
+                // Core — same 88pt footprint as the play button at rest, so
+                // the swap doesn't visually shrink the surface. Bounce
+                // scales UP from 1.0 → 1.2 instead of in from a smaller base.
+                Circle()
+                    .fill(Ambient.textPrimary)
+                    .frame(width: 88, height: 88)
+                    .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
+                    .scaleEffect(1.0 + CGFloat(level) * 0.20)
+                    .shadow(color: .white.opacity(0.25), radius: 18)
+
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(Ambient.bg)
+                    // Track the core's scale so the icon doesn't visibly
+                    // shrink relative to the body as it bounces.
+                    .scaleEffect(1.0 + CGFloat(level) * 0.20)
+            }
+            .animation(.spring(response: 0.18, dampingFraction: 0.55), value: level)
+            .frame(width: 96, height: 96)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Voice mode replacement for the scrubber's green fill. Oscilloscope-
+/// style sine wave that fills the bar width, amplitude tied to the
+/// session's active level. Drawn through `TimelineView(.animation)` so
+/// it self-animates without external state.
+private struct VoiceWaveformBar: View {
+    let session: RealtimeVoiceSession?
+    let color: Color
+    let glow: Color
+
+    var body: some View {
+        if let session {
+            VoiceWaveformBarLive(session: session, color: color, glow: glow)
+        } else {
+            VoiceWaveformBarCore(active: false, level: 0, color: color, glow: glow)
+        }
+    }
+}
+
+private struct VoiceWaveformBarLive: View {
+    @ObservedObject var session: RealtimeVoiceSession
+    let color: Color
+    let glow: Color
+
+    var body: some View {
+        // Activate only when the assistant is actually speaking AND the
+        // WebRTC receiver is delivering non-trivial audio. The threshold
+        // filters out idle hiss between turns.
+        let active = session.phase == .speaking && session.outputLevel > 0.02
+        VoiceWaveformBarCore(
+            active: active,
+            level: active ? session.outputLevel : 0,
+            color: color,
+            glow: glow
+        )
+    }
+}
+
+private struct VoiceWaveformBarCore: View {
+    let active: Bool
+    let level: Float
+    let color: Color
+    let glow: Color
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            Canvas { ctx, size in
+                let mid = size.height / 2
+                let baseAmp = CGFloat(level) * size.height * 0.45
+                // Carrier frequency in cycles across the bar width. Higher =
+                // finer waveform; lower = chunkier "speaker membrane" feel.
+                let cycles = 6.0
+                var path = Path()
+                path.move(to: CGPoint(x: 0, y: mid))
+                let step: CGFloat = 1.5
+                var x: CGFloat = 0
+                while x <= size.width {
+                    let n = x / max(size.width, 1)
+                    // Envelope tethers the wave at both ends — amplitude is
+                    // 0 at x=0 and x=width, peaks at the midpoint. Reads as
+                    // a vibrating string anchored to the scrubber endpoints.
+                    let envelope = sin(n * .pi)
+                    let y = mid + sin(n * cycles * 2 * .pi + t * 6.0) * baseAmp * envelope
+                    path.addLine(to: CGPoint(x: x, y: y))
+                    x += step
+                }
+                ctx.addFilter(.shadow(color: glow.opacity(0.45), radius: 6))
+                ctx.stroke(path, with: .color(color), lineWidth: 2)
+            }
+        }
+        .opacity(active ? 1 : 0)
+        .animation(.easeInOut(duration: 0.25), value: active)
+        .allowsHitTesting(false)
     }
 }
