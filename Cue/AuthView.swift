@@ -1,8 +1,8 @@
 import SwiftUI
 
 struct AuthView: View {
-    @EnvironmentObject var state: AppState
-    @ObservedObject var api: CueAPI
+    @Environment(AppState.self) private var state
+    let api: CueAPI
 
     enum Step { case phone, code }
     @State private var step: Step = .phone

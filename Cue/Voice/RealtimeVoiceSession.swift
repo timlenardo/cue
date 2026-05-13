@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import Observation
 import WebRTC
 import os
 
@@ -31,7 +32,8 @@ private let log = Logger(subsystem: "com.toug.cue", category: "RealtimeVoice")
 /// Mirrors voice-ai-playground/lib/providers/openai-realtime/client.ts
 /// but translated to stasel/WebRTC's Swift API.
 @MainActor
-final class RealtimeVoiceSession: NSObject, ObservableObject {
+@Observable
+final class RealtimeVoiceSession: NSObject {
     enum Phase: String, Equatable {
         case idle, connecting, listening, thinking, speaking, ended, error
     }
@@ -44,36 +46,36 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         let showTitle: String
     }
 
-    @Published private(set) var phase: Phase = .idle
-    @Published private(set) var userTranscript: String = ""
-    @Published private(set) var assistantTranscript: String = ""
-    @Published private(set) var errorMessage: String?
+    private(set) var phase: Phase = .idle
+    private(set) var userTranscript: String = ""
+    private(set) var assistantTranscript: String = ""
+    private(set) var errorMessage: String?
 
     /// Smoothed 0..1 amplitude of the user's mic, sourced from the WebRTC
     /// `media-source` audio-level stat (pre-encoding). Drives the play-button
     /// orb bounce in voice mode.
-    @Published private(set) var inputLevel: Float = 0
+    private(set) var inputLevel: Float = 0
     /// Smoothed 0..1 amplitude of the assistant's TTS, sourced from the
     /// WebRTC `inbound-rtp` audio-level stat. Stays at 0 whenever the
     /// receiver isn't actually delivering audio frames, which lets the
     /// oscilloscope go flat between turns.
-    @Published private(set) var outputLevel: Float = 0
+    private(set) var outputLevel: Float = 0
 
-    private var levelTimer: AnyCancellable?
+    @ObservationIgnored private var levelTimer: AnyCancellable?
 
-    private let api: CueAPI
-    private weak var state: AppState?
+    @ObservationIgnored private let api: CueAPI
+    @ObservationIgnored private weak var state: AppState?
 
-    private let factory: RTCPeerConnectionFactory
-    private var peerConnection: RTCPeerConnection?
-    private var dataChannel: RTCDataChannel?
-    private var pendingContextMessage: String?
-    private var interruptionObserver: NSObjectProtocol?
+    @ObservationIgnored private let factory: RTCPeerConnectionFactory
+    @ObservationIgnored private var peerConnection: RTCPeerConnection?
+    @ObservationIgnored private var dataChannel: RTCDataChannel?
+    @ObservationIgnored private var pendingContextMessage: String?
+    @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
 
     /// Forwards every realtime event to cue-server for LangSmith tracing.
     /// Non-nil only when the server returned a traceId on session mint.
-    private var telemetry: VoiceTelemetry?
-    private(set) var traceId: String?
+    @ObservationIgnored private var telemetry: VoiceTelemetry?
+    @ObservationIgnored private(set) var traceId: String?
 
     /// RTCInitializeSSL must be called exactly once per process. This
     /// static `let` enforces that without us tracking a flag.
@@ -85,7 +87,7 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
     /// AVAudioEngine and plays inbound audio back through the same engine.
     /// POC for the unified pipeline; supersedes WebRTC's default ADM so
     /// there's one input HAL owner across all audio surfaces.
-    private let audioDevice: CueAudioDevice
+    @ObservationIgnored private let audioDevice: CueAudioDevice
 
     init(api: CueAPI, state: AppState) {
         _ = Self.sslInit

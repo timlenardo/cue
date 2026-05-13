@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Observation
 import AVFAudio
 
 enum Tab: String { case listen, library, notes }
@@ -23,25 +24,26 @@ struct LiveEpisode {
 }
 
 @MainActor
-final class AppState: ObservableObject {
-    @Published var tab: Tab = .listen
-    @Published var playerOpen: Bool = false
-    @Published var voiceOpen: Bool = false
+@Observable
+final class AppState {
+    var tab: Tab = .listen
+    var playerOpen: Bool = false
+    var voiceOpen: Bool = false
     /// Lags `voiceOpen` by the shade's animation duration on open. Used to
     /// gate the in-place control morph (scrubber fill → waveform, play
     /// button → mic orb) so the white scrubber thumb isn't briefly
     /// bisected by the appearing grey track mid-transition.
-    @Published var voiceMorphActive: Bool = false
+    var voiceMorphActive: Bool = false
     /// Drives the play dot, green progress fill, and play icon. Fades to
     /// false during phase 1 of opening the voice agent, then back to true
     /// during phase 2 of closing it. Lets the dot + green fade out before
     /// the waveform takes their slot, killing the bisection on the scrubber.
-    @Published var playbackDetailsVisible: Bool = true
+    var playbackDetailsVisible: Bool = true
     /// Snapshot of `playing` at the moment `voiceOpen` flipped true. The
     /// play button's glyph reads from this while voice mode is open, so
     /// the pause→play flip caused by `audio.pause()` inside
     /// `openVoiceAgent` doesn't change the icon mid-transition.
-    @Published var playingAtVoiceOpen: Bool = false
+    var playingAtVoiceOpen: Bool = false
 
     /// Drives the play button glyph (pause vs play). Mirrors `playing`
     /// normally; pins to its pre-voiceOpen value while voice mode is open.
@@ -49,11 +51,11 @@ final class AppState: ObservableObject {
 
     /// True while the wake-word engine is listening. Drives any UI affordance
     /// (e.g. a "listening" indicator on the mic button).
-    @Published private(set) var wakeArmed: Bool = false
+    private(set) var wakeArmed: Bool = false
 
-    @Published var currentTime: Double = 0
-    @Published var playing: Bool = false
-    @Published var speedIdx: Int = AppState.loadSpeedIdx() {
+    var currentTime: Double = 0
+    var playing: Bool = false
+    var speedIdx: Int = AppState.loadSpeedIdx() {
         didSet { AppState.saveSpeedIdx(speedIdx) }
     }
 
@@ -69,32 +71,32 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(idx, forKey: speedIdxKey)
     }
 
-    @Published var paletteName: PaletteName = .ambient
+    var paletteName: PaletteName = .ambient
 
-    @Published var loadPhase: LoadPhase = .idle
-    @Published var live: LiveEpisode?
+    var loadPhase: LoadPhase = .idle
+    var live: LiveEpisode?
 
-    @Published var library: [LibraryItem] = []
-    @Published var libraryLoading: Bool = false
+    var library: [LibraryItem] = []
+    var libraryLoading: Bool = false
 
     /// Active OpenAI Realtime session, set while VoiceAgentView is on screen.
     /// `nil` when the voice agent is closed, or when we opened the agent
     /// without a live episode (canned-sample mode — no transcript to mint
     /// a session against).
-    @Published var voiceSession: RealtimeVoiceSession?
+    var voiceSession: RealtimeVoiceSession?
 
-    let audio = AudioPlayer()
-    let wake = WakeWordEngine()
+    @ObservationIgnored let audio = AudioPlayer()
+    @ObservationIgnored let wake = WakeWordEngine()
     /// Mirrors the scene phase so updateWakeArmed() knows whether to listen.
     /// RootView pushes updates via sceneDidChange(active:).
-    private var scenePhaseActive: Bool = true
+    @ObservationIgnored private var scenePhaseActive: Bool = true
     /// Edge tracker — true iff we currently hold a MicCapture ref for the
     /// wake engine. Used to issue exactly one start()/stop() per transition.
-    private var micArmedForWake: Bool = false
-    private var audioSubs: Set<AnyCancellable> = []
-    private var progressSyncTimer: AnyCancellable?
-    private var lastSyncedPosition: Double = -1
-    private var lastSyncAt: Date?
+    @ObservationIgnored private var micArmedForWake: Bool = false
+    @ObservationIgnored private var audioSubs: Set<AnyCancellable> = []
+    @ObservationIgnored private var progressSyncTimer: AnyCancellable?
+    @ObservationIgnored private var lastSyncedPosition: Double = -1
+    @ObservationIgnored private var lastSyncAt: Date?
 
     var palette: Palette { paletteName.palette }
     var speed: Double { Speeds.values[speedIdx] }
@@ -111,8 +113,8 @@ final class AppState: ObservableObject {
 
     // MARK: - Init
 
-    private var simulatedTimer: AnyCancellable?
-    private var lastSimulatedTick: Date?
+    @ObservationIgnored private var simulatedTimer: AnyCancellable?
+    @ObservationIgnored private var lastSimulatedTick: Date?
 
     init() {
         startSimulatedTimer()
@@ -235,7 +237,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private var lastNowPlayingSecond: Int = -1
+    @ObservationIgnored private var lastNowPlayingSecond: Int = -1
 
     private func startSimulatedTimer() {
         simulatedTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common)
