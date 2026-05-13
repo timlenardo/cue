@@ -200,6 +200,26 @@ final class AppState {
         UserDefaults.standard.set(v, forKey: wakeTrackingKey)
     }
 
+    /// Dev toggle: when on, the wake-word engine is held down even if an
+    /// episode is loaded. Mic capture stays up (voice mode can still be
+    /// opened manually), but ambient speech can't open the AI. Persisted
+    /// across launches.
+    var wakePaused: Bool = AppState.loadWakePaused() {
+        didSet {
+            guard oldValue != wakePaused else { return }
+            AppState.saveWakePaused(wakePaused)
+            updateWakeArmed()
+        }
+    }
+
+    private static let wakePausedKey = "cue.wakePaused"
+    private static func loadWakePaused() -> Bool {
+        UserDefaults.standard.bool(forKey: wakePausedKey)
+    }
+    private static func saveWakePaused(_ v: Bool) {
+        UserDefaults.standard.set(v, forKey: wakePausedKey)
+    }
+
     /// Dev toggle: when on, render a small HUD with the live AVAudioSession
     /// mode and VPIO state. Persisted across launches.
     var audioSessionDebugEnabled: Bool = AppState.loadAudioSessionDebug() {
@@ -483,7 +503,7 @@ final class AppState {
         // the engine, because firing wake without a loaded episode opens
         // an empty voice agent that the user has no context for.
         let shouldRunMic = live != nil
-        let shouldArmWake = shouldRunMic && !voiceOpen
+        let shouldArmWake = shouldRunMic && !voiceOpen && !wakePaused
 
         if shouldRunMic != micArmedForWake {
             micArmedForWake = shouldRunMic
