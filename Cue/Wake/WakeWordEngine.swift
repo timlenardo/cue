@@ -36,15 +36,49 @@ final class WakeWordEngine: @unchecked Sendable {
     private static let WindowSeconds: Double = 2.0
     private static let WindowSamples: Int = Int(16_000 * 2)
     /// Minimum gap between Whisper inferences. Smaller = more responsive
-    /// but more CPU; ~600 ms is comfortable on iPhone Neural Engine.
-    private static let InferenceIntervalMs: Int = 600
+    /// but more CPU. 250 ms gives us 4 overlapping windows per second —
+    /// even a 200 ms blip lands inside at least one inference.
+    private static let InferenceIntervalMs: Int = 250
+    /// Minimum audio buffered before we'll run inference at all. 200 ms
+    /// is roughly the floor before Whisper transcribes pure garbage.
+    private static let MinAudioMs: Int = 200
     private static let Debounce: TimeInterval = 1.5
     /// English-only tiny model. Smallest viable Whisper for wake-word.
     private static let ModelName = "openai_whisper-tiny.en"
 
+    // MARK: - Sensitivity (passed to Whisper's DecodingOptions)
+    //
+    // Whisper marks a segment as silent when `no-speech probability >
+    // noSpeechThreshold` AND `avg log-prob < logProbThreshold`. Defaults
+    // (0.6 / -1.0) are tuned for clean transcription; for wake-word we
+    // want it MUCH more eager to emit text. Lowering both means we get
+    // more false transcripts of background noise, but the trigger regex
+    // already filters those — only specific words fire `onDetect`.
+
+    /// Lower = more aggressive. Default 0.6. We set this very low (0.05)
+    /// to establish the "Whisper hallucinates everything" floor —
+    /// calibrate UP from here once the false-positive rate is measurable.
+    private static let NoSpeechThreshold: Float = 0.05
+    /// Lower (more negative) = more aggressive. Default -1.0. -3.0 means
+    /// even low-confidence per-token decodings are accepted.
+    private static let LogProbThreshold: Float = -3.0
+
+    /// Software gain applied to resampled samples before they reach Whisper.
+    /// VPIO's hardware AGC tends to leave samples peaking at ±0.1–0.2 even
+    /// during normal speech, leaving most of the float range unused. Boosting
+    /// by 2–3× (with clip to ±1.0) gives Whisper the full-range audio it
+    /// was trained on. Higher values risk clipping artifacts at high volume.
+    private static let SoftwareGain: Float = 3.0
+    /// Silence padding (ms) prepended to each Whisper transcription. Short
+    /// utterances near the leading edge of the buffer transcribe poorly
+    /// because they're out-of-distribution — Whisper expects speech
+    /// surrounded by audio context. 500 ms of leading silence gives the
+    /// model breathing room and meaningfully improves quick-word recall.
+    private static let LeadingSilencePadMs: Int = 500
+
     /// Triggers we accept. Word-boundary, case-insensitive. Add more
     /// aliases here as you hear false-negatives in the logs.
-    private static let TriggerPattern = #"\b(alexa|qq|q\s*q|cue\s*cue|queue\s*queue|kew\s*kew|coo\s*coo|hey\s+cue|hey\s+q(ueue|ew|u)?)\b"#
+    private static let TriggerPattern = #"\b(tangent|sidebar|orb|orbit|alexa|qq|q\s*q|cue\s*cue|queue\s*queue|kew\s*kew|coo\s*coo|hey\s+cue|hey\s+q(ueue|ew|u)?)\b"#
 
     // MARK: - State
     private let triggerRegex: NSRegularExpression = {
@@ -147,9 +181,11 @@ final class WakeWordEngine: @unchecked Sendable {
         let snapshot = rolling
         bufLock.unlock()
 
-        // Only run inference once we've accumulated at least ~700 ms of
-        // audio — anything shorter is too noisy for Whisper.
-        guard snapshot.count >= Int(Self.TargetSampleRate * 0.7) else { return }
+        // Only run inference once we've accumulated the minimum window.
+        // Lower than ~200 ms is too short for Whisper to reliably decode
+        // anything; higher than ~300 ms misses quick single-word triggers.
+        let minSamples = Int(Self.TargetSampleRate * Double(Self.MinAudioMs) / 1000.0)
+        guard snapshot.count >= minSamples else { return }
 
         // Throttle inference cadence + single-in-flight gate.
         let now = Date()
@@ -177,7 +213,7 @@ final class WakeWordEngine: @unchecked Sendable {
 
     private func runInference(pipe: WhisperKit, samples: [Float]) async {
         do {
-            let opts = DecodingOptions(
+            var opts = DecodingOptions(
                 verbose: false,
                 task: .transcribe,
                 language: "en",
@@ -187,7 +223,21 @@ final class WakeWordEngine: @unchecked Sendable {
                 skipSpecialTokens: true,
                 withoutTimestamps: true
             )
-            let results = try await pipe.transcribe(audioArray: samples, decodeOptions: opts)
+            // Make Whisper less eager to call audio "silence". Default
+            // thresholds suppress quick single-word utterances; the wake
+            // word needs them MUCH lower. The trigger regex filters any
+            // false transcripts that result.
+            opts.noSpeechThreshold = Self.NoSpeechThreshold
+            opts.logProbThreshold = Self.LogProbThreshold
+            // Pad with leading silence so short utterances aren't right at
+            // the buffer edge. Whisper transcribes speech much more
+            // reliably when it has audio context around it — even if that
+            // context is zeros. Counter-intuitive but reproducible.
+            let padSamples = Int(Self.TargetSampleRate * Double(Self.LeadingSilencePadMs) / 1000.0)
+            let padded = padSamples > 0
+                ? Array(repeating: Float(0), count: padSamples) + samples
+                : samples
+            let results = try await pipe.transcribe(audioArray: padded, decodeOptions: opts)
             let text = results
                 .map { $0.text }
                 .joined(separator: " ")
@@ -270,7 +320,18 @@ final class WakeWordEngine: @unchecked Sendable {
             if let error { log.error("convert: \(error.localizedDescription, privacy: .public)") }
             return []
         }
-        return Array(UnsafeBufferPointer(start: channelData, count: Int(out.frameLength)))
+        // Apply software gain on the way out. VPIO's AGC tends to leave
+        // float samples peaking far below ±1.0; this gives Whisper the
+        // full-range audio its training distribution expects. Clip
+        // hard at ±1.0 to keep loud audio from wrapping.
+        let frameCount = Int(out.frameLength)
+        var samples = [Float](repeating: 0, count: frameCount)
+        let gain = Self.SoftwareGain
+        for i in 0..<frameCount {
+            let amplified = channelData[i] * gain
+            samples[i] = max(-1.0, min(1.0, amplified))
+        }
+        return samples
     }
 }
 #endif
