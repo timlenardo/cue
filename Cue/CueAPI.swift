@@ -59,6 +59,10 @@ struct ResolvedEpisode: Codable {
     let pubDate: String?
     let guid: String
     let description: String?
+    /// Episode-specific cover art. The server falls back to the show's
+    /// artwork when no per-episode image is available, so this can be used
+    /// directly by Library cards and the mini-player.
+    let artworkUrl: String?
 }
 
 struct ResolvedPodcast: Codable {
@@ -103,6 +107,7 @@ struct ServerEpisode: Codable, Equatable {
     let episodeGuid: String?
     let episodePubDate: String?
     let episodeDescription: String?
+    let episodeArtworkUrl: String?
     let durationSeconds: Double?
 }
 
@@ -474,6 +479,7 @@ final class CueAPI {
             "episodeGuid": episode.guid,
             "episodePubDate": episode.pubDate as Any,
             "episodeDescription": episode.description as Any,
+            "episodeArtworkUrl": episode.artworkUrl as Any,
             "durationSeconds": episode.durationSeconds as Any,
         ].compactMapValues { v in
             if v is NSNull { return nil }

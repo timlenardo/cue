@@ -127,7 +127,12 @@ private struct NowPlayingCard: View {
         }()
 
         HStack(spacing: 14) {
-            ShowMonogram(text: ep.showTitle, size: 72, radius: 14)
+            EpisodeArtworkView(
+                urlString: ep.episodeArtworkUrl ?? ep.showArtworkUrl,
+                fallbackTitle: ep.showTitle,
+                size: 72,
+                radius: 14
+            )
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(eyebrow)
@@ -256,7 +261,12 @@ private struct EpisodeRow: View {
             Task { await state.openFromLibrary(item) }
         } label: {
             HStack(spacing: 12) {
-                ShowMonogram(text: ep.showTitle, size: 52, radius: 10)
+                EpisodeArtworkView(
+                    urlString: ep.episodeArtworkUrl ?? ep.showArtworkUrl,
+                    fallbackTitle: ep.showTitle,
+                    size: 52,
+                    radius: 10
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(ep.showTitle)
@@ -312,73 +322,6 @@ private struct EpisodeRow: View {
                 Label("Remove from library", systemImage: "trash")
             }
         }
-    }
-}
-
-// MARK: - Generic show monogram (no SampleData dependency)
-
-private struct ShowMonogram: View {
-    let text: String
-    let size: CGFloat
-    let radius: CGFloat
-
-    // Computed once at init; body reads cached values. Library rows can be
-    // rebuilt as the user scrolls / paginates, so even though the inner
-    // text rarely changes, recomputing the FNV-1a hash per body adds up.
-    private let monogram: String
-    private let color: Color
-
-    init(text: String, size: CGFloat, radius: CGFloat) {
-        self.text = text
-        self.size = size
-        self.radius = radius
-        self.monogram = Self.makeMonogram(from: text)
-        self.color = Self.makeColor(from: text)
-    }
-
-    private static func makeMonogram(from text: String) -> String {
-        let words = text
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .filter { !$0.isEmpty }
-        if let first = words.first?.first {
-            if words.count >= 2, let second = words.dropFirst().first?.first {
-                return "\(first)\(second)".uppercased()
-            }
-            return "\(first)".uppercased()
-        }
-        return "?"
-    }
-
-    /// Deterministic dark color from the show-title hash.
-    private static func makeColor(from text: String) -> Color {
-        var h: UInt64 = 1469598103934665603
-        for byte in text.utf8 {
-            h ^= UInt64(byte)
-            h = h &* 1099511628211
-        }
-        let hue = Double(h % 360) / 360.0
-        return Color(hue: hue, saturation: 0.45, brightness: 0.32)
-    }
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [color, color.opacity(0.85)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Text(monogram)
-                .font(Fonts.serif(size * 0.36, weight: .semibold))
-                .tracking(-0.5)
-                .foregroundStyle(.white)
-        }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
     }
 }
 

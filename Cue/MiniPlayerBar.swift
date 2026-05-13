@@ -19,7 +19,12 @@ struct MiniPlayerBar: View {
         }()
 
         let bar = HStack(spacing: 10) {
-            MiniMonogram(text: show.title, size: 36, radius: 8)
+            EpisodeArtworkView(
+                urlString: episode.artworkUrl ?? show.artworkUrl,
+                fallbackTitle: show.title,
+                size: 36,
+                radius: 8
+            )
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(episode.title)
@@ -78,71 +83,3 @@ struct MiniPlayerBar: View {
     }
 }
 
-/// Mini monogram tile, deterministic color from the show title.
-/// (Stripped-down copy of LibraryView's ShowMonogram — kept here so the
-/// MiniPlayerBar has no cross-file dependency.)
-private struct MiniMonogram: View {
-    let text: String
-    let size: CGFloat
-    let radius: CGFloat
-
-    // Computed once at struct init — body reads cached values directly.
-    // The parent's body runs at 10 Hz (it reads `currentTime` for the
-    // progress strip), so without caching the FNV-1a hash + token split
-    // ran ~10×/sec. Realistic 1 µs/op × 10 → 10 µs/sec; not visible alone
-    // but multiplies across mini bar + library rows.
-    private let monogram: String
-    private let color: Color
-
-    init(text: String, size: CGFloat, radius: CGFloat) {
-        self.text = text
-        self.size = size
-        self.radius = radius
-        self.monogram = Self.makeMonogram(from: text)
-        self.color = Self.makeColor(from: text)
-    }
-
-    private static func makeMonogram(from text: String) -> String {
-        let words = text
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .filter { !$0.isEmpty }
-        if let first = words.first?.first {
-            if words.count >= 2, let second = words.dropFirst().first?.first {
-                return "\(first)\(second)".uppercased()
-            }
-            return "\(first)".uppercased()
-        }
-        return "?"
-    }
-
-    private static func makeColor(from text: String) -> Color {
-        var h: UInt64 = 1469598103934665603
-        for byte in text.utf8 {
-            h ^= UInt64(byte)
-            h = h &* 1099511628211
-        }
-        let hue = Double(h % 360) / 360.0
-        return Color(hue: hue, saturation: 0.45, brightness: 0.32)
-    }
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [color, color.opacity(0.85)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Text(monogram)
-                .font(Fonts.serif(size * 0.36, weight: .semibold))
-                .tracking(-0.5)
-                .foregroundStyle(.white)
-        }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
-    }
-}
