@@ -71,16 +71,22 @@ private struct WakeTranscriptOverlay: View {
     var body: some View {
         VStack(spacing: 8) {
             ForEach(state.wakeTranscripts) { toast in
-                HStack(spacing: 8) {
-                    Text(toast.text)
-                        .font(Fonts.sans(14, weight: .medium))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                    if toast.isHit {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(Color(hex: "34C759"))
+                VStack(spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(toast.text)
+                            .font(Fonts.sans(14, weight: .medium))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                        if toast.isHit {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(Color(hex: "34C759"))
+                        }
+                    }
+                    if state.audioLevelsDebugEnabled, let levels = toast.levels {
+                        Self.levelsView(levels)
+                            .font(Fonts.mono(11, weight: .medium))
                     }
                 }
                 .padding(.horizontal, 14)
@@ -93,6 +99,47 @@ private struct WakeTranscriptOverlay: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .animation(.easeInOut(duration: 0.2), value: state.wakeTranscripts)
+    }
+
+    /// Render the level snapshot as a compact one-line subtitle:
+    ///   `in: -22 → -8 dB · clip 0.0%`
+    /// Pre-gain dBFS on the left of the arrow, post-gain pre-clip dBFS on
+    /// the right. Healthy target for post-gain is roughly -10 to -3 dB
+    /// (Whisper's training distribution); clip rate should stay near 0.
+    ///
+    /// Only the post-gain number is colored — that's the one that needs
+    /// to land in Whisper's distribution. The pre-gain is informational
+    /// (what VPIO gave us), and the clip rate is already self-explanatory
+    /// at 0.0% vs anything non-zero.
+    private static func levelsView(_ l: AudioLevelStats) -> Text {
+        let pre = Int(l.preGainDBFS.rounded())
+        let post = Int(l.postGainDBFS.rounded())
+        let clipPct = l.clipRate * 100
+        // %+d emits an explicit "+" for positive numbers — useful here
+        // because post-gain >0 dBFS is the "you're clipping" signal.
+        let neutral = Color.white.opacity(0.85)
+        return Text(String(format: "in: %+d → ", pre)).foregroundStyle(neutral)
+            + Text(String(format: "%+d dB", post)).foregroundStyle(postGainColor(l.postGainDBFS))
+            + Text(String(format: " · clip %.1f%%", clipPct)).foregroundStyle(neutral)
+    }
+
+    /// Color the post-gain dBFS reading based on how it sits relative to
+    /// Whisper's training distribution. Hand-picked sRGB hex values rather
+    /// than `.green/.yellow/.red` so the colors stay legible against the
+    /// black toast background regardless of the user's accent color.
+    ///
+    /// Thresholds:
+    ///   green     -10 dB ≤ post ≤ -3 dB    (ideal — Whisper's distribution)
+    ///   yellow    -15 to -10, or -3 to 0   (workable but drifting)
+    ///   red       < -15 (too quiet), or > 0 (clipping)
+    private static func postGainColor(_ dBFS: Double) -> Color {
+        if dBFS > 0 || dBFS < -15 {
+            return Color(hex: "FF453A")   // red
+        }
+        if dBFS >= -10 && dBFS <= -3 {
+            return Color(hex: "32D74B")   // green
+        }
+        return Color(hex: "FFD60A")        // yellow
     }
 }
 

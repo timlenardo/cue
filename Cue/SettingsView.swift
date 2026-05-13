@@ -19,6 +19,12 @@ struct SettingsView: View {
                         )
                         Divider().background(state.palette.cardEdge).padding(.leading, 14)
                         toggleRow(
+                            title: "Audio levels",
+                            subtitle: "Append peak amplitudes to each wake transcript: pre-gain → post-gain (pre-clip) in dBFS, plus clip rate. Whisper expects roughly -10 to -3 dBFS for speech. Requires wake word tracking.",
+                            isOn: $state.audioLevelsDebugEnabled
+                        )
+                        Divider().background(state.palette.cardEdge).padding(.leading, 14)
+                        toggleRow(
                             title: "AV Audio Session internals",
                             subtitle: "Show a HUD with the live AVAudioSession mode and VPIO state.",
                             isOn: $state.audioSessionDebugEnabled
