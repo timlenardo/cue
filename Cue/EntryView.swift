@@ -72,6 +72,8 @@ struct EntryView: View {
         .padding(.top, Geo.statusBarReserve)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.bg.ignoresSafeArea())
+        .contentShape(Rectangle())
+        .onTapGesture { urlFieldFocused = false }
     }
 
     // MARK: - Paste card
