@@ -163,6 +163,16 @@ final class MicCapture {
     /// known volume-headroom side effect — that's the tradeoff for
     /// having the mic not hear the podcast.
     private func bringUpEngine() {
+        // Detach any previously-registered output sources from the current
+        // engine BEFORE we replace it. AVAudioEngine treats a node attached
+        // to two engine instances as undefined behavior — typically a crash
+        // on the next render tick — and just letting the old engine fall
+        // out of scope doesn't reliably detach in time.
+        for entry in registeredOutputSources.values {
+            engine.disconnectNodeOutput(entry.node)
+            engine.detach(entry.node)
+        }
+
         let wantVP = shouldUseVoiceProcessing()
 
         // Session: switch to `.voiceChat` when we want AEC; force speaker

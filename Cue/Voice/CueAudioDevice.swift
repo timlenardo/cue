@@ -89,9 +89,37 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
 
     // MARK: - Init
 
+    /// Pre-allocated scratch buffer for renderPlayout — sized once on
+    /// first use and reused thereafter. Avoids per-render allocations
+    /// on the audio render thread.
+    private var renderScratch: UnsafeMutableRawPointer?
+    private var renderScratchBytes: Int = 0
+    private let renderScratchLock = NSLock()
+
     override init() {
         super.init()
         admQueue.setSpecific(key: admQueueKey, value: true)
+    }
+
+    deinit {
+        // Belt-and-suspenders cleanup: WebRTC's ADM lifecycle SHOULD call
+        // stopPlayout on teardown, which unregisters the source node. But
+        // if the framework drops that call (or this object is deallocated
+        // before stopPlayout fires), the node accumulates in MicCapture's
+        // dictionary across voice sessions — visible as growing memory
+        // and growing engine input-bus count.
+        if let source = outputSourceNode {
+            // Hop to main since MicCapture is @MainActor. The dict lookup
+            // is by ObjectIdentifier so it's safe to call from any thread
+            // as long as we hop first.
+            let nodeRef = source
+            Task { @MainActor in
+                MicCapture.shared.unregisterOutputSource(nodeRef)
+            }
+        }
+        if let scratch = renderScratch {
+            scratch.deallocate()
+        }
     }
 
     // MARK: - RTCAudioDevice — lifecycle
@@ -299,8 +327,11 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
 
         let int16Count = Int(frameCount) * kChannels
         let int16Bytes = int16Count * MemoryLayout<Int16>.size
-        let scratch = UnsafeMutableRawPointer.allocate(byteCount: int16Bytes, alignment: MemoryLayout<Int16>.alignment)
-        defer { scratch.deallocate() }
+
+        // Reuse a persistent scratch buffer. Allocating + deallocating
+        // every render tick on the audio thread is both wasteful and
+        // non-realtime-safe — the allocator can block under pressure.
+        let scratch = ensureRenderScratch(bytes: int16Bytes)
         memset(scratch, 0, int16Bytes)
 
         var audioBuffer = AudioBuffer(
@@ -335,5 +366,24 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
                 memset(data, 0, Int(buffer.mDataByteSize))
             }
         }
+    }
+
+    /// Lazy-grow scratch buffer. Allocation only happens on first call or
+    /// when the requested size exceeds the current allocation — typically
+    /// once per session.
+    nonisolated private func ensureRenderScratch(bytes: Int) -> UnsafeMutableRawPointer {
+        renderScratchLock.lock()
+        defer { renderScratchLock.unlock() }
+        if let scratch = renderScratch, renderScratchBytes >= bytes {
+            return scratch
+        }
+        if let old = renderScratch {
+            old.deallocate()
+        }
+        let alignment = MemoryLayout<Int16>.alignment
+        let scratch = UnsafeMutableRawPointer.allocate(byteCount: bytes, alignment: alignment)
+        renderScratch = scratch
+        renderScratchBytes = bytes
+        return scratch
     }
 }
