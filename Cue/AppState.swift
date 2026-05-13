@@ -168,34 +168,33 @@ final class AppState: ObservableObject {
 
     // MARK: - Wake-word arming
     //
-    // MicCapture and WakeWordEngine have *different* lifecycles:
+    // Simple rule: MicCapture + WakeWordEngine run as long as an episode
+    // is loaded. Both stay alive through:
+    //   - background / lock-screen (driving with a locked phone: user
+    //     should be able to say "qq" / "cue cue" and trigger voice mode
+    //     without unlocking)
+    //   - SwiftUI scenePhase flapping on innocuous events
+    //   - mini-player vs full-player view changes
     //
-    //   - MicCapture runs whenever the player is open with an episode
-    //     loaded — REGARDLESS of scene phase or voice-mode state. It
-    //     must stay alive through:
-    //       - voice mode (CueAudioDevice reads its buffers to send to
-    //         OpenAI and renders TTS back through its mainMixerNode)
-    //       - background / lock-screen (so an in-flight conversation
-    //         continues, and so SwiftUI scenePhase flapping on innocuous
-    //         events like Control Center / notifications doesn't cycle
-    //         the engine off-and-on)
+    // The wake engine pauses only while voice mode is open, so the AI's
+    // TTS doesn't re-trigger a wake during its own response.
     //
-    //   - WakeWordEngine listens only when the user is actively in the
-    //     foreground (`scenePhaseActive`) and not already in voice mode.
-    //     Wake-word detection in background is undesirable (battery +
-    //     privacy + the AI's TTS shouldn't self-trigger).
+    // `UIBackgroundModes: audio` (set in Info.plist) is what lets iOS
+    // allow the mic to keep recording in background.
 
-    /// Called by RootView on scene-phase transitions.
+    /// Kept for future scene-phase-aware features (none currently). Wake
+    /// detection deliberately ignores scene phase so it works on a locked
+    /// phone.
     func sceneDidChange(active: Bool) {
         scenePhaseActive = active
-        updateWakeArmed()
     }
 
-    /// Reconcile MicCapture + WakeWordEngine to the current UI state.
-    /// Idempotent. Called from every state transition that affects either.
+    /// Reconcile MicCapture + WakeWordEngine to the current state.
+    /// Idempotent. Called from any transition that changes `live` or
+    /// `voiceOpen`.
     private func updateWakeArmed() {
-        let shouldRunMic = live != nil && playerOpen
-        let shouldArmWake = shouldRunMic && scenePhaseActive && !voiceOpen
+        let shouldRunMic = live != nil
+        let shouldArmWake = shouldRunMic && !voiceOpen
 
         if shouldRunMic != micArmedForWake {
             micArmedForWake = shouldRunMic
