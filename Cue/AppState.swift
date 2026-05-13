@@ -259,6 +259,16 @@ final class AppState {
     var library: [LibraryItem] = []
     var libraryLoading: Bool = false
 
+    /// Flat list of every saved note for the user, newest-first, with episode
+    /// metadata embedded. Powers the Notes tab.
+    var allNotes: [ServerNoteWithEpisode] = []
+    var notesLoading: Bool = false
+
+    /// Per-episode notes keyed by serverEpisodeId. Populated lazily when an
+    /// episode goes live so the player scrubber can render its markers
+    /// without round-tripping every time the live state changes.
+    var notesByEpisode: [Int: [ServerNote]] = [:]
+
     /// Active OpenAI Realtime session, set while VoiceAgentView is on screen.
     /// `nil` when the voice agent is closed, or when we opened the agent
     /// without a live episode (canned-sample mode — no transcript to mint
@@ -721,6 +731,66 @@ final class AppState {
         }
     }
 
+    // MARK: - Notes
+
+    /// Refresh the flat Notes-tab list from the server.
+    func reloadAllNotes() async {
+        notesLoading = true
+        defer { notesLoading = false }
+        do {
+            allNotes = try await CueAPI.shared.getAllNotes()
+        } catch {
+            print("[Cue] notes reload failed: \(error)")
+        }
+    }
+
+    /// Load notes for the currently-playing episode so the scrubber can
+    /// render markers. Called from `loadLive` whenever a new episode comes
+    /// up.
+    func reloadNotesForLiveEpisode(episodeId: Int) async {
+        do {
+            let notes = try await CueAPI.shared.getNotes(episodeId: episodeId)
+            notesByEpisode[episodeId] = notes
+        } catch {
+            print("[Cue] per-episode notes reload failed: \(error)")
+        }
+    }
+
+    /// Insert a freshly-saved note into both caches so the scrubber marker
+    /// + Notes tab update without a refetch. Called from the `save_note`
+    /// realtime tool dispatch on success.
+    func appendNote(_ note: ServerNoteWithEpisode) {
+        allNotes.insert(note, at: 0)
+        let perEp = ServerNote(
+            id: note.id,
+            episodeId: note.episodeId,
+            positionSeconds: note.positionSeconds,
+            text: note.text,
+            createdAt: note.createdAt
+        )
+        var existing = notesByEpisode[note.episodeId] ?? []
+        existing.append(perEp)
+        existing.sort { $0.positionSeconds < $1.positionSeconds }
+        notesByEpisode[note.episodeId] = existing
+    }
+
+    func deleteNote(noteId: Int) async {
+        // Optimistic remove — rollback on failure.
+        let priorAll = allNotes
+        let priorByEp = notesByEpisode
+        allNotes.removeAll { $0.id == noteId }
+        for (epId, list) in notesByEpisode {
+            notesByEpisode[epId] = list.filter { $0.id != noteId }
+        }
+        do {
+            try await CueAPI.shared.deleteNote(noteId: noteId)
+        } catch {
+            print("[Cue] delete note failed: \(error)")
+            allNotes = priorAll
+            notesByEpisode = priorByEp
+        }
+    }
+
     // MARK: - Progress sync
 
     private func startProgressSyncTimer() {
@@ -789,6 +859,9 @@ final class AppState {
             duration: duration ?? 0,
             elapsed: resumeAt
         )
+        if let episodeId = live.serverEpisodeId {
+            Task { await self.reloadNotesForLiveEpisode(episodeId: episodeId) }
+        }
         openPlayer()
     }
 

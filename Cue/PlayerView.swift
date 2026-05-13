@@ -442,6 +442,8 @@ private struct ProgressBar: View {
                                 .frame(maxHeight: .infinity, alignment: .center)
                                 .shadow(color: Ambient.accentGlow.opacity(0.45), radius: 8)
 
+                            NoteMarkers(trackWidth: w, duration: duration)
+
                             Circle()
                                 .fill(.white)
                                 .frame(width: 14, height: 14)
@@ -496,6 +498,43 @@ private struct ProgressBar: View {
             .opacity(voiceOpen ? 0.15 : 1)
             .animation(.easeInOut(duration: 0.25), value: voiceOpen)
         }
+    }
+}
+
+/// Bookmark glyphs pinned to each saved-note timestamp along the scrubber.
+/// Tap → seek. Rendered inside the same GeometryReader so they share `w` and
+/// stay locked to the track regardless of orientation/size changes.
+private struct NoteMarkers: View {
+    @Environment(AppState.self) private var state
+    let trackWidth: CGFloat
+    let duration: Double
+
+    var body: some View {
+        let notes = currentNotes
+        if !notes.isEmpty && duration > 0 {
+            ZStack(alignment: .leading) {
+                ForEach(notes) { note in
+                    let pct = max(0, min(1, note.positionSeconds / duration))
+                    Button {
+                        state.seek(note.positionSeconds)
+                    } label: {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color(red: 1.0, green: 0.84, blue: 0.0))
+                            .shadow(color: .black.opacity(0.55), radius: 1.5, y: 1)
+                    }
+                    .buttonStyle(.plain)
+                    .offset(x: trackWidth * CGFloat(pct) - 5, y: 8)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .allowsHitTesting(true)
+        }
+    }
+
+    private var currentNotes: [ServerNote] {
+        guard let id = state.live?.serverEpisodeId else { return [] }
+        return state.notesByEpisode[id] ?? []
     }
 }
 

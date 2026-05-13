@@ -5,6 +5,7 @@ struct NotesView: View {
 
     var body: some View {
         let palette = state.palette
+        let notes = state.allNotes
 
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -18,7 +19,7 @@ struct NotesView: View {
             .padding(.horizontal, 22)
             .padding(.top, 8)
 
-            Text("Everything you've asked Cue, plus moments you saved.")
+            Text("Moments you asked Cue to save while listening.")
                 .font(Fonts.sans(12.5))
                 .foregroundStyle(palette.inkMuted)
                 .lineSpacing(2)
@@ -26,127 +27,87 @@ struct NotesView: View {
                 .padding(.top, 6)
                 .padding(.bottom, 4)
 
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(SampleData.notes) { group in
-                        NotesGroupView(group: group)
-                            .padding(.top, 18)
+            if notes.isEmpty {
+                NotesEmptyState()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(spacing: 10) {
+                        ForEach(notes) { note in
+                            NoteRowView(note: note)
+                                .padding(.horizontal, 16)
+                        }
                     }
+                    .padding(.top, 12)
+                    .padding(.bottom, 20)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 20)
-                .padding(.top, 8)
+                .refreshable {
+                    await state.reloadAllNotes()
+                }
             }
         }
         .padding(.top, Geo.statusBarReserve)
         .padding(.bottom, Geo.bottomDock)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.bg.ignoresSafeArea())
-    }
-}
-
-private struct NotesGroupView: View {
-    @Environment(AppState.self) private var state
-    let group: NoteGroup
-
-    var body: some View {
-        let palette = state.palette
-        let show = SampleData.show(group.showKey)
-
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                CoverTile(showKey: group.showKey, size: 32, radius: 7)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(group.episode)
-                        .font(Fonts.sans(14, weight: .semibold))
-                        .tracking(-0.1)
-                        .foregroundStyle(palette.ink)
-                        .lineLimit(1)
-                    Text("\(show.name) · \(group.when)")
-                        .font(Fonts.sans(11))
-                        .foregroundStyle(palette.inkMuted)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 6)
-            .padding(.bottom, 10)
-
-            VStack(spacing: 0) {
-                ForEach(Array(group.items.enumerated()), id: \.element.id) { idx, item in
-                    NoteRow(item: item)
-                    if idx < group.items.count - 1 {
-                        Rectangle()
-                            .fill(palette.cardEdge)
-                            .frame(height: 0.5)
-                            .padding(.leading, 52)
-                    }
-                }
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(palette.surface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(palette.cardEdge, lineWidth: 0.5)
-                    )
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .task {
+            // Quietly refresh whenever the tab is opened — keeps the list in
+            // sync after a save-note happened in a different session.
+            await state.reloadAllNotes()
         }
     }
 }
 
-private struct NoteRow: View {
+private struct NoteRowView: View {
     @Environment(AppState.self) private var state
-    let item: NoteItem
+    let note: ServerNoteWithEpisode
 
     var body: some View {
         let palette = state.palette
-        let isAsk = item.kind == .ask
 
         Button {
-            state.openPlayer()
+            Task { await openNote() }
         } label: {
             HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(isAsk ? palette.accentSoft : palette.subtle)
-                    if isAsk {
-                        Image(systemName: "mic.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(palette.accent)
-                    } else {
-                        Image(systemName: "quote.bubble.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(palette.inkMuted)
-                    }
-                }
-                .frame(width: 26, height: 26)
-                .padding(.top, 2)
+                EpisodeArtworkView(
+                    urlString: note.episode.showArtworkUrl,
+                    fallbackTitle: note.episode.showTitle,
+                    size: 44,
+                    radius: 9
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(isAsk ? "YOU ASKED" : "SAVED CLIP")
-                            .font(Fonts.sans(10.5, weight: .bold))
-                            .tracking(1)
-                            .foregroundStyle(isAsk ? palette.accent : palette.inkMuted)
-                        Text(item.timestamp)
+                    // Show + episode name. Show name in accent caps, episode
+                    // title in muted secondary line.
+                    Text(note.episode.showTitle)
+                        .font(Fonts.sans(11, weight: .bold))
+                        .tracking(0.6)
+                        .textCase(.uppercase)
+                        .foregroundStyle(palette.accent)
+                        .lineLimit(1)
+                    Text(note.episode.episodeTitle)
+                        .font(Fonts.sans(12.5, weight: .medium))
+                        .foregroundStyle(palette.inkMuted)
+                        .lineLimit(1)
+
+                    // Primary: the note text.
+                    Text(note.text)
+                        .font(Fonts.sans(15, weight: .medium))
+                        .lineSpacing(3)
+                        .foregroundStyle(palette.ink)
+                        .multilineTextAlignment(.leading)
+                        .padding(.top, 2)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(palette.accent.opacity(0.85))
+                        Text(Format.clock(note.positionSeconds))
                             .font(Fonts.sans(11))
                             .monospacedDigit()
                             .foregroundStyle(palette.inkFade)
                     }
-                    if isAsk {
-                        Text(item.body)
-                            .font(Fonts.sans(14, weight: .medium))
-                            .lineSpacing(3)
-                            .foregroundStyle(palette.ink)
-                            .multilineTextAlignment(.leading)
-                    } else {
-                        Text(item.body)
-                            .font(.system(size: 15, weight: .regular, design: .serif).italic())
-                            .lineSpacing(3)
-                            .foregroundStyle(palette.ink)
-                            .multilineTextAlignment(.leading)
-                    }
+                    .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -154,5 +115,64 @@ private struct NoteRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(palette.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(palette.cardEdge, lineWidth: 0.5)
+                )
+        )
+        .contextMenu {
+            Button(role: .destructive) {
+                Task { await state.deleteNote(noteId: note.id) }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    /// Tap on a note row: if its episode is the one currently playing, just
+    /// jump to that point. Otherwise open the episode from the library and
+    /// seek there.
+    @MainActor
+    private func openNote() async {
+        if state.live?.serverEpisodeId == note.episodeId {
+            state.seek(note.positionSeconds)
+            state.openPlayer()
+            return
+        }
+        if let item = state.library.first(where: { $0.episode.id == note.episodeId }) {
+            await state.openFromLibrary(item)
+            // openFromLibrary resumes at the saved progress — override to
+            // the note's anchor point so the tap lands at the moment.
+            state.seek(note.positionSeconds)
+        } else {
+            // Episode no longer in the user's library (removed after the
+            // note was saved). Falling back to opening the player on
+            // whatever's live is the least surprising thing to do.
+            state.openPlayer()
+        }
+    }
+}
+
+private struct NotesEmptyState: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        let palette = state.palette
+        VStack(spacing: 14) {
+            Image(systemName: "bookmark")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(palette.inkMuted)
+            Text("No saved moments yet")
+                .font(Fonts.sans(15, weight: .semibold))
+                .foregroundStyle(palette.ink)
+            Text("Say \u{201C}Cue, save this\u{201D} while you\u{2019}re listening and the moment will land here.")
+                .font(Fonts.sans(12.5))
+                .foregroundStyle(palette.inkMuted)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+        }
     }
 }

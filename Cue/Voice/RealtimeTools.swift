@@ -103,6 +103,40 @@ enum RealtimeTools {
                 return .nonTerminal(outputJSON: #"{"error":"\#(msg)"}"#)
             }
 
+        case "save_note":
+            guard let live = state.live else {
+                return .nonTerminal(outputJSON: #"{"ok":false,"error":"no episode loaded"}"#)
+            }
+            let rawNote = (args["note"] as? String) ?? ""
+            let text = rawNote.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                return .nonTerminal(outputJSON: #"{"ok":false,"error":"empty note"}"#)
+            }
+            let positionSeconds = state.audio.currentTime
+            do {
+                let resp = try await api.saveNote(
+                    audioUrl: live.episode.audioUrl,
+                    positionSeconds: positionSeconds,
+                    text: text,
+                    traceId: traceId,
+                    callId: callId
+                )
+                if let note = resp.note {
+                    state.appendNote(note)
+                    log.info("save_note saved id=\(note.id) at \(positionSeconds)s chars=\(text.count)")
+                    return .nonTerminal(outputJSON: #"{"ok":true,"id":\#(note.id),"savedAtSeconds":\#(positionSeconds)}"#)
+                } else {
+                    let msg = resp.error ?? "save failed"
+                    log.error("save_note rejected: \(msg, privacy: .public)")
+                    let safe = msg.replacingOccurrences(of: "\"", with: "'")
+                    return .nonTerminal(outputJSON: #"{"ok":false,"error":"\#(safe)"}"#)
+                }
+            } catch {
+                log.error("save_note failed: \(error.localizedDescription, privacy: .public)")
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "'")
+                return .nonTerminal(outputJSON: #"{"ok":false,"error":"\#(msg)"}"#)
+            }
+
         case "search_internet":
             let query = (args["query"] as? String) ?? ""
             guard !query.isEmpty else {

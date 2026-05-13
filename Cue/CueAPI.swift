@@ -124,6 +124,64 @@ private struct LibraryListResponse: Codable {
     let items: [LibraryItem]
 }
 
+// MARK: - Notes DTOs
+
+/// A user-pinned note anchored to a playback position within an episode.
+/// Returned from `GET /v1/library/:id/notes` (the per-episode flavor that
+/// powers the player scrubber — no embedded episode).
+struct ServerNote: Codable, Identifiable, Equatable {
+    let id: Int
+    let episodeId: Int
+    let positionSeconds: Double
+    let text: String
+    let createdAt: String
+}
+
+/// Episode metadata embedded alongside a note in the flat-list response.
+/// Smaller than `ServerEpisode` because the Notes tab only needs the
+/// fields it actually renders (show name, episode title, artwork) plus
+/// `audioUrl` for navigation.
+struct NoteEpisodeRef: Codable, Equatable {
+    let id: Int
+    let audioUrl: String
+    let showTitle: String
+    let showAuthor: String?
+    let showArtworkUrl: String?
+    let episodeTitle: String
+    let durationSeconds: Double?
+}
+
+/// A note joined with its episode, returned by `GET /v1/library/notes`.
+/// Sorted newest-first server-side.
+struct ServerNoteWithEpisode: Codable, Identifiable, Equatable {
+    let id: Int
+    let episodeId: Int
+    let positionSeconds: Double
+    let text: String
+    let createdAt: String
+    let episode: NoteEpisodeRef
+}
+
+private struct NotesListResponse: Codable {
+    let notes: [ServerNote]
+}
+
+private struct AllNotesListResponse: Codable {
+    let notes: [ServerNoteWithEpisode]
+}
+
+struct SaveNoteRequest: Encodable {
+    let audioUrl: String
+    let positionSeconds: Double
+    let text: String
+}
+
+struct SaveNoteResponse: Decodable {
+    let ok: Bool
+    let note: ServerNoteWithEpisode?
+    let error: String?
+}
+
 // MARK: - Voice realtime DTOs
 
 struct VoiceSessionRequest: Encodable {
@@ -495,6 +553,49 @@ final class CueAPI {
     func removeFromLibrary(episodeId: Int) async throws {
         struct Empty: Decodable { let success: Bool }
         let _: Empty = try await delete("/v1/library/\(episodeId)")
+    }
+
+    // MARK: - Notes
+
+    /// Server-side handler for the `save_note` realtime tool. iOS dispatches
+    /// this when the model emits a `save_note` function_call; the response
+    /// goes back to OpenAI as the `function_call_output` of the same callId.
+    /// Same `traceId` + `callId` header conventions as `searchTranscript`.
+    func saveNote(
+        audioUrl: String,
+        positionSeconds: Double,
+        text: String,
+        traceId: String? = nil,
+        callId: String? = nil
+    ) async throws -> SaveNoteResponse {
+        try await post(
+            "/v1/voice/tools/save-note",
+            body: SaveNoteRequest(
+                audioUrl: audioUrl,
+                positionSeconds: positionSeconds,
+                text: text
+            ),
+            headers: traceHeaders(traceId: traceId, callId: callId)
+        )
+    }
+
+    /// Flat list of every note for the current account, newest first, with
+    /// episode metadata embedded — powers the Notes tab.
+    func getAllNotes() async throws -> [ServerNoteWithEpisode] {
+        let resp: AllNotesListResponse = try await get("/v1/library/notes")
+        return resp.notes
+    }
+
+    /// Notes for a single episode, ordered by playback position — powers
+    /// the scrubber markers on the player.
+    func getNotes(episodeId: Int) async throws -> [ServerNote] {
+        let resp: NotesListResponse = try await get("/v1/library/\(episodeId)/notes")
+        return resp.notes
+    }
+
+    func deleteNote(noteId: Int) async throws {
+        struct Empty: Decodable { let success: Bool }
+        let _: Empty = try await delete("/v1/library/notes/\(noteId)")
     }
 
     // MARK: - Request helpers
