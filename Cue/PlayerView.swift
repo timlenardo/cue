@@ -819,7 +819,7 @@ private struct VoiceOrbCore: View {
     // release) is the Galaxy default. See LiquidOrbDebug.swift if you want
     // to re-tune.
     private static let gain: Double = 4.0
-    private static let cap: Double = 0.30
+    private static let cap: Double = 0.10
     private static let attackSec: Double = 0.30
     private static let releaseSec: Double = 0.60
     private static let morphPeriodSec: Double = 1.2
