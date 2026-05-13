@@ -134,6 +134,14 @@ struct EntryView: View {
                     .focused($urlFieldFocused)
                     .frame(maxWidth: .infinity)
                     .disabled(isLoading)
+                    .toolbar {
+                        ToolbarItemGroup(placement: .keyboard) {
+                            Spacer()
+                            Button("Done") { urlFieldFocused = false }
+                                .font(Fonts.sans(14, weight: .semibold))
+                                .foregroundStyle(palette.ink)
+                        }
+                    }
 
                     if !url.isEmpty {
                         Button {
