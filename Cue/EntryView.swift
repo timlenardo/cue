@@ -72,6 +72,8 @@ struct EntryView: View {
         .padding(.top, Geo.statusBarReserve)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.bg.ignoresSafeArea())
+        .contentShape(Rectangle())
+        .onTapGesture { urlFieldFocused = false }
     }
 
     // MARK: - Paste card
@@ -134,14 +136,6 @@ struct EntryView: View {
                     .focused($urlFieldFocused)
                     .frame(maxWidth: .infinity)
                     .disabled(isLoading)
-                    .toolbar {
-                        ToolbarItemGroup(placement: .keyboard) {
-                            Spacer()
-                            Button("Done") { urlFieldFocused = false }
-                                .font(Fonts.sans(14, weight: .semibold))
-                                .foregroundStyle(palette.ink)
-                        }
-                    }
 
                     if !url.isEmpty {
                         Button {
