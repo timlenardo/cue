@@ -5,6 +5,8 @@ with a real OpenAI Realtime voice loop over WebRTC. It builds on the
 on-device wake-word integration (say "QQ" or "Cue Cue" to open the
 voice agent) that was already WIP on `main`.
 
+> **Adding a realtime voice tool?** See [AGENTS.md](./AGENTS.md#adding-a-new-realtime-tool) for the end-to-end checklist across this repo + cue-server. Five touchpoints; skipping any one fails silently.
+
 ## What this branch adds
 
 | | |
