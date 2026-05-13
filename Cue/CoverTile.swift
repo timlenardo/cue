@@ -9,28 +9,9 @@ struct EpisodeArtworkView: View {
     var size: CGFloat = 56
     var radius: CGFloat = 12
 
-    // Computed once at init; body reads cached values. The mini-player's
-    // body re-runs at ~10 Hz (it observes `currentTime` for the progress
-    // strip) and library rows can be rebuilt on every scroll diff, so even
-    // though the inputs rarely change, recomputing the FNV-1a hash + token
-    // split + URL parser each render adds up.
-    private let parsedURL: URL?
-    private let monogramText: String
-    private let monogramColor: Color
-
-    init(urlString: String?, fallbackTitle: String, size: CGFloat = 56, radius: CGFloat = 12) {
-        self.urlString = urlString
-        self.fallbackTitle = fallbackTitle
-        self.size = size
-        self.radius = radius
-        self.parsedURL = urlString.flatMap(URL.init(string:))
-        self.monogramText = EpisodeArtworkMonogram.text(from: fallbackTitle)
-        self.monogramColor = EpisodeArtworkMonogram.color(from: fallbackTitle)
-    }
-
     var body: some View {
         Group {
-            if let url = parsedURL {
+            if let s = urlString, let url = URL(string: s) {
                 AsyncImage(url: url, transaction: Transaction(animation: .easeInOut(duration: 0.2))) { phase in
                     switch phase {
                     case .empty:
@@ -57,13 +38,14 @@ struct EpisodeArtworkView: View {
     }
 
     private var monogram: some View {
-        ZStack {
+        let color = EpisodeArtworkMonogram.color(from: fallbackTitle)
+        return ZStack {
             LinearGradient(
-                colors: [monogramColor, monogramColor.opacity(0.85)],
+                colors: [color, color.opacity(0.85)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            Text(monogramText)
+            Text(EpisodeArtworkMonogram.text(from: fallbackTitle))
                 .font(Fonts.serif(size * 0.36, weight: .semibold))
                 .tracking(-0.5)
                 .foregroundStyle(.white)
