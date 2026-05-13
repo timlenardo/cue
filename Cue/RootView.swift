@@ -16,6 +16,7 @@ struct RootView: View {
                     .task(id: api.isAuthenticated) {
                         AppStateAccess.current = state
                         await state.reloadLibrary()
+                        await state.reloadAllNotes()
                     }
             } else {
                 AuthView(api: api)

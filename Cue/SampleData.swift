@@ -42,38 +42,6 @@ enum SampleData {
         .init(showKey: "hard",   title: "OpenAI vs. everyone, again",         duration: 49 * 60 + 12, progress: 1,    dateLabel: "May 2"),
     ]
 
-    // MARK: - Notes
-
-    static let notes: [NoteGroup] = [
-        NoteGroup(
-            showKey: "deep",
-            episode: "Galaxies that shouldn't exist",
-            when: "Today",
-            items: [
-                NoteItem(kind: .ask,  timestamp: "00:48", body: "Why does the universe expanding pull light into infrared?"),
-                NoteItem(kind: .clip, timestamp: "01:12", body: "\u{201C}Light from the most distant galaxies has been traveling for over thirteen billion years to reach the mirror.\u{201D}"),
-            ]
-        ),
-        NoteGroup(
-            showKey: "ezra",
-            episode: "A conversation about loneliness",
-            when: "Monday",
-            items: [
-                NoteItem(kind: .ask,  timestamp: "14:22", body: "What did Putnam mean by \u{201C}social capital\u{201D} exactly?"),
-                NoteItem(kind: .ask,  timestamp: "32:09", body: "Is this loneliness epidemic actually new, or did we just start measuring?"),
-                NoteItem(kind: .clip, timestamp: "47:51", body: "\u{201C}The point isn\u{2019}t to manufacture community. The point is to stop demolishing it.\u{201D}"),
-            ]
-        ),
-        NoteGroup(
-            showKey: "search",
-            episode: "Why is my grocery bill so weird?",
-            when: "Tuesday",
-            items: [
-                NoteItem(kind: .ask, timestamp: "08:14", body: "How is shrinkflation different from regular inflation?"),
-            ]
-        ),
-    ]
-
     // MARK: - Transcript
 
     private static let rawTranscript: [(String, String)] = [

@@ -18,23 +18,6 @@ struct Episode: Identifiable, Equatable {
     let dateLabel: String
 }
 
-enum NoteKind: Equatable { case ask, clip }
-
-struct NoteItem: Identifiable, Equatable {
-    let id = UUID()
-    let kind: NoteKind
-    let timestamp: String
-    let body: String
-}
-
-struct NoteGroup: Identifiable, Equatable {
-    let id = UUID()
-    let showKey: String
-    let episode: String
-    let when: String
-    let items: [NoteItem]
-}
-
 struct TranscriptWord: Equatable {
     let text: String
     let start: Double
