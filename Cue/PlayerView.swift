@@ -554,20 +554,16 @@ private struct ProgressBar: View {
 
             // Time row with centered chapter label. Dimmed in voice mode —
             // time/chapter are irrelevant while the agent is mid-turn.
-            ZStack {
-                HStack {
-                    Text(Format.clock(state.currentTime))
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .tracking(0.4)
-                        .foregroundStyle(Ambient.textPast)
-                    Spacer()
-                    Text("-\(Format.clock(duration - state.currentTime))")
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .tracking(0.4)
-                        .foregroundStyle(Ambient.textPast)
-                }
+            // Timestamps are fixedSize so they never compress; the chapter
+            // HStack absorbs the remaining width and truncates its title.
+            HStack(spacing: 8) {
+                Text(Format.clock(state.currentTime))
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+                    .tracking(0.4)
+                    .foregroundStyle(Ambient.textPast)
+                    .fixedSize()
+                Spacer(minLength: 8)
                 HStack(spacing: 6) {
                     Circle()
                         .fill(Ambient.accent)
@@ -578,7 +574,15 @@ private struct ProgressBar: View {
                         .tracking(0.2)
                         .foregroundStyle(Ambient.textPrimary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
+                Spacer(minLength: 8)
+                Text("-\(Format.clock(duration - state.currentTime))")
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+                    .tracking(0.4)
+                    .foregroundStyle(Ambient.textPast)
+                    .fixedSize()
             }
             .opacity(voiceOpen ? 0 : 1)
             .animation(.easeInOut(duration: 0.25), value: voiceOpen)
