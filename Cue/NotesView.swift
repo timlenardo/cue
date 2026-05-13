@@ -31,16 +31,25 @@ struct NotesView: View {
                 NotesEmptyState()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: 10) {
-                        ForEach(notes) { note in
-                            NoteRowView(note: note)
-                                .padding(.horizontal, 16)
-                        }
+                List {
+                    ForEach(notes) { note in
+                        NoteRowView(note: note)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    Task { await state.deleteNote(noteId: note.id) }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
                     }
-                    .padding(.top, 12)
-                    .padding(.bottom, 20)
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .scrollIndicators(.hidden)
+                .environment(\.defaultMinListRowHeight, 0)
                 .refreshable {
                     await state.reloadAllNotes()
                 }
