@@ -70,10 +70,15 @@ final class MicCapture {
     /// built-in speaker (the only route with an acoustic echo path).
     private var voiceProcessingActive: Bool = false
 
-    /// Public read-only view of `voiceProcessingActive` for the dev
-    /// "AV Audio Session internals" HUD. Reading a Bool cross-thread is
-    /// safe (no tearing on 1-bit values); writers all run on main.
+    /// Public read-only view of our intent flag (what we *believe* VPIO
+    /// should be). Diverges from `isVoiceProcessingEnabledLive` when iOS
+    /// flips VPIO under us — useful as a HUD signal for that exact bug.
     var isVoiceProcessingActive: Bool { voiceProcessingActive }
+
+    /// Canonical VPIO state read directly off the input node. Pair with
+    /// `isVoiceProcessingActive` in the debug HUD to catch intent-vs-live
+    /// drift (e.g. another component overwriting the session under us).
+    var isVoiceProcessingEnabledLive: Bool { engine.inputNode.isVoiceProcessingEnabled }
 
     /// Output sources (e.g. WebRTC's playback path) waiting to be attached
     /// to `engine.mainMixerNode`. Survives engine rebuilds — every time
