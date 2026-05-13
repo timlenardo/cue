@@ -78,7 +78,7 @@ final class WakeWordEngine: @unchecked Sendable {
 
     /// Triggers we accept. Word-boundary, case-insensitive. Add more
     /// aliases here as you hear false-negatives in the logs.
-    private static let TriggerPattern = #"\b(tangent|sidebar|orb|orbit|alexa|qq|q\s*q|cue\s*cue|queue\s*queue|kew\s*kew|coo\s*coo|hey\s+cue|hey\s+q(ueue|ew|u)?)\b"#
+    private static let TriggerPattern = #"\b(tangent|sidebar|orbit)\b"#
 
     // MARK: - State
     private let triggerRegex: NSRegularExpression = {
