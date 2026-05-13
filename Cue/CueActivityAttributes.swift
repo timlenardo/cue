@@ -43,6 +43,20 @@ struct CueActivityAttributes: ActivityAttributes {
             self.userGlowLevel = userGlowLevel
             self.assistantGlowLevel = assistantGlowLevel
         }
+
+        // Custom decoder so an in-flight Live Activity encoded by a
+        // previous app version (only elapsed + playing) doesn't fail to
+        // decode after upgrade. Swift's synthesized Decodable doesn't
+        // honor init defaults for missing keys; `decodeIfPresent` does.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            elapsed = try c.decode(Double.self, forKey: .elapsed)
+            playing = try c.decode(Bool.self, forKey: .playing)
+            inVoiceMode = try c.decodeIfPresent(Bool.self, forKey: .inVoiceMode) ?? false
+            voiceMorphActive = try c.decodeIfPresent(Bool.self, forKey: .voiceMorphActive) ?? false
+            userGlowLevel = try c.decodeIfPresent(Double.self, forKey: .userGlowLevel) ?? 0
+            assistantGlowLevel = try c.decodeIfPresent(Double.self, forKey: .assistantGlowLevel) ?? 0
+        }
     }
 
     public let show: String

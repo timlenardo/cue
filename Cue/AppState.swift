@@ -246,6 +246,13 @@ final class AppState {
         startProgressSyncTimer()
         NowPlayingCenter.shared.attach(self)
 
+        // Stop the 5Hz LA glow sampler if the activity goes away externally
+        // (system tear-down, user swipe-away, budget exhaustion). Without
+        // this the Timer would keep firing against a nil activity.
+        LiveActivityController.shared.onActivityEnded = { [weak self] in
+            self?.stopLiveActivityGlowSampler()
+        }
+
         let nc = NotificationCenter.default
         nc.addObserver(forName: .cuePlayPause, object: nil, queue: .main) { [weak self] _ in
             self?.togglePlay()
@@ -344,11 +351,18 @@ final class AppState {
     // `UIBackgroundModes: audio` (set in Info.plist) is what lets iOS
     // allow the mic to keep recording in background.
 
-    /// Kept for future scene-phase-aware features (none currently). Wake
-    /// detection deliberately ignores scene phase so it works on a locked
-    /// phone.
+    /// Wake detection deliberately ignores scene phase so it works on a
+    /// locked phone. The Live Activity glow sampler does not — running
+    /// the 5Hz push loop in the background burns ActivityKit's push
+    /// budget for no visible benefit (the lock screen is what the user
+    /// sees while backgrounded, and the LA there is read-only anyway).
     func sceneDidChange(active: Bool) {
         scenePhaseActive = active
+        if !active {
+            stopLiveActivityGlowSampler()
+        } else if voiceOpen, voiceSession != nil {
+            startLiveActivityGlowSampler()
+        }
     }
 
     /// Push a transcript into the toast stack and schedule its 2s removal.

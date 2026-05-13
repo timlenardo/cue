@@ -32,6 +32,30 @@ final class LiveActivityController {
     private var assistantGlowLevel: Double = 0
     private var lastGlowPushAt: Date?
 
+    /// Fired when the underlying Activity transitions to `.ended` /
+    /// `.dismissed` (system tear-down, user swipe-away, budget exhaustion,
+    /// or explicit `end()`). AppState wires this to stop its 5Hz glow
+    /// sampler so the timer doesn't keep firing against a nil activity.
+    /// Annotated `@MainActor` because subscribers (e.g. AppState) typically
+    /// invoke MainActor-isolated methods from the callback.
+    var onActivityEnded: (@MainActor () -> Void)?
+
+    #if canImport(ActivityKit)
+    /// Holds the long-running activityStateUpdates observer Task so we
+    /// can cancel it when the activity ends or is replaced.
+    private var stateObserverTask: Task<Void, Never>?
+    #endif
+
+    /// Whether a Live Activity is currently active. AppState's sampler
+    /// reads this to avoid burning timer ticks when no activity exists.
+    func hasActivity() -> Bool {
+        #if canImport(ActivityKit)
+        return activity != nil
+        #else
+        return false
+        #endif
+    }
+
     /// Begin a Live Activity for the currently playing episode. Replaces any
     /// existing activity so the most recent paste wins.
     func start(show: String, episode: String, duration: Double, elapsed: Double) {
@@ -54,6 +78,7 @@ final class LiveActivityController {
                     content: .init(state: state, staleDate: nil)
                 )
                 activity = act
+                observeStateUpdates(for: act)
                 print("[Cue/LA] activity started id=\(act.id) state=\(act.activityState)")
             } catch {
                 print("[Cue/LA] start failed: \(error)")
@@ -161,10 +186,48 @@ final class LiveActivityController {
 
     #if canImport(ActivityKit)
     private func endNow() async {
+        stateObserverTask?.cancel()
+        stateObserverTask = nil
+        let hadActivity = activity != nil
         if let activity {
             await activity.end(nil, dismissalPolicy: .immediate)
         }
         activity = nil
+        // Reset voice state so the next activity doesn't inherit stale
+        // flags / glow levels from the prior session.
+        resetVoiceState()
+        // Fire the lifecycle callback so subscribers (AppState's sampler)
+        // stop work even when end was triggered explicitly rather than by
+        // the system tearing the activity down.
+        if hadActivity { onActivityEnded?() }
+    }
+
+    /// Observe ActivityKit lifecycle so we notice external dismissals
+    /// (system tear-down, user swipe-away, budget exhaustion). Without
+    /// this, AppState's 5Hz sampler keeps firing against a dead activity.
+    /// The enclosing class is @MainActor, so the Task inherits isolation.
+    private func observeStateUpdates(for activity: Activity<CueActivityAttributes>) {
+        stateObserverTask?.cancel()
+        stateObserverTask = Task { @MainActor [weak self] in
+            for await stateUpdate in activity.activityStateUpdates {
+                guard let self else { return }
+                if stateUpdate == .ended || stateUpdate == .dismissed {
+                    print("[Cue/LA] activity ended externally state=\(stateUpdate)")
+                    self.activity = nil
+                    self.resetVoiceState()
+                    self.onActivityEnded?()
+                    return
+                }
+            }
+        }
+    }
+
+    private func resetVoiceState() {
+        inVoiceMode = false
+        voiceMorphActive = false
+        userGlowLevel = 0
+        assistantGlowLevel = 0
+        lastGlowPushAt = nil
     }
     #endif
 }
