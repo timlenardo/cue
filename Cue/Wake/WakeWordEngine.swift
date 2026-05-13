@@ -91,9 +91,12 @@ final class WakeWordEngine: @unchecked Sendable {
     private var lastInferenceAt: Date = .distantPast
     private var inferenceInFlight: Bool = false
 
-    // Rolling 16 kHz mono buffer.
+    // Rolling 16 kHz mono buffer. Fixed-capacity ring (sliding window)
+    // so each push is bulk memcpy with no `removeFirst` memmove of the
+    // remaining ~32 000 samples (was burning ~128 KB / mic tick on the
+    // audio render thread).
     private let bufLock = NSLock()
-    private var rolling: [Float] = []
+    private var rolling = RingBuffer<Float>(capacity: WindowSamples, fill: 0)
 
     // Mic subscription / resampler.
     private var bufferToken: UUID?
@@ -124,7 +127,7 @@ final class WakeWordEngine: @unchecked Sendable {
             bufferToken = nil
         }
         bufLock.lock()
-        rolling.removeAll(keepingCapacity: true)
+        rolling.removeAll()
         bufLock.unlock()
         stateLock.lock()
         lastInferenceAt = .distantPast
@@ -172,22 +175,22 @@ final class WakeWordEngine: @unchecked Sendable {
         guard !samples.isEmpty else { return }
 
         bufLock.lock()
-        rolling.append(contentsOf: samples)
-        if rolling.count > Self.WindowSamples {
-            rolling.removeFirst(rolling.count - Self.WindowSamples)
-        }
-        // Snapshot under the lock; release immediately so we don't block
-        // the audio thread while inference runs.
-        let snapshot = rolling
+        samples.withUnsafeBufferPointer { rolling.pushBack($0) }
+        let availableCount = rolling.count
         bufLock.unlock()
 
         // Only run inference once we've accumulated the minimum window.
         // Lower than ~200 ms is too short for Whisper to reliably decode
         // anything; higher than ~300 ms misses quick single-word triggers.
         let minSamples = Int(Self.TargetSampleRate * Double(Self.MinAudioMs) / 1000.0)
-        guard snapshot.count >= minSamples else { return }
+        guard availableCount >= minSamples else { return }
 
-        // Throttle inference cadence + single-in-flight gate.
+        // Throttle inference cadence + single-in-flight gate. Snapshot the
+        // window only after we've decided to dispatch — that's where the
+        // O(N) copy actually has to happen (handing samples to the
+        // detached Task). Previously we snapshotted on every mic tick and
+        // discarded it via the throttle bail, which paid a 32 000-Float
+        // CoW-fork cost ~12×/sec for no benefit.
         let now = Date()
         stateLock.lock()
         let dueMs = now.timeIntervalSince(lastInferenceAt) * 1000
@@ -202,6 +205,10 @@ final class WakeWordEngine: @unchecked Sendable {
         lastInferenceAt = now
         inferenceInFlight = true
         stateLock.unlock()
+
+        bufLock.lock()
+        let snapshot = rolling.snapshot()
+        bufLock.unlock()
 
         Task.detached(priority: .userInitiated) { [weak self] in
             await self?.runInference(pipe: pipe, samples: snapshot)

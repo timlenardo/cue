@@ -100,7 +100,15 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     private var micHandlerToken: UUID?
     private var inputConverter: AVAudioConverter?
     private var inputTargetFormat: AVAudioFormat?
-    private var inputRing: [Int16] = []
+    /// Mic FIFO drained in 10 ms chunks for WebRTC. Touched only on
+    /// `admQueue`. Capacity tracks the worst-case backlog when WebRTC's
+    /// downstream queue stalls — ~340 ms at 48 kHz, generous since the
+    /// realistic peak is ~30 ms.
+    private var inputRing = RingBuffer<Int16>(capacity: 16_384, fill: 0)
+    /// Pre-allocated scratch for draining one 480-frame chunk out of
+    /// `inputRing` into WebRTC's deliver callback. Sized once; reused
+    /// per chunk so the admQueue path stays allocation-free.
+    private var inputDeliverScratch: [Int16] = []
     /// Monotonic sample-frame counter passed to WebRTC's `deliverRecordedData`
     /// as `AudioTimeStamp.mSampleTime`. Increments by exactly
     /// `kFramesPerChunk` per delivered chunk. WebRTC's APM (AEC delay
@@ -225,7 +233,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
                 MicCapture.shared.removeBufferHandler(token)
                 self.micHandlerToken = nil
             }
-            self.inputRing.removeAll(keepingCapacity: true)
+            self.inputRing.removeAll()
             self.inputConverter = nil
             self.inputTargetFormat = nil
             self.inputConvertBuffer = nil
@@ -374,35 +382,40 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
         admQueue.async { [weak self] in
             guard let self else { return }
             guard self._isRecording else { return }
-            self.inputRing.append(contentsOf: samples)
-            while self.inputRing.count >= self.kFramesPerChunk {
-                let chunk = Array(self.inputRing.prefix(self.kFramesPerChunk))
-                self.inputRing.removeFirst(self.kFramesPerChunk)
-                self.deliverChunk(chunk)
+            samples.withUnsafeBufferPointer { self.inputRing.pushBack($0) }
+            if self.inputDeliverScratch.count < self.kFramesPerChunk {
+                self.inputDeliverScratch = [Int16](repeating: 0, count: self.kFramesPerChunk)
+            }
+            self.inputDeliverScratch.withUnsafeMutableBufferPointer { scratchPtr in
+                while self.inputRing.count >= self.kFramesPerChunk {
+                    _ = self.inputRing.popFront(
+                        into: scratchPtr.baseAddress!,
+                        count: self.kFramesPerChunk
+                    )
+                    self.deliverChunk(buffer: scratchPtr.baseAddress!, count: self.kFramesPerChunk)
+                }
             }
         }
     }
 
     /// Called on `admQueue` only — `inputSampleClock` mutation is safe.
-    private func deliverChunk(_ samples: [Int16]) {
+    /// Takes a raw pointer + count so the caller can drain straight from
+    /// the ring buffer scratch without re-wrapping into an Array.
+    private func deliverChunk(buffer: UnsafePointer<Int16>, count: Int) {
         guard let deliver = deliverRecordedData else { return }
-
-        var mutableSamples = samples
         let clock = inputSampleClock
-        mutableSamples.withUnsafeMutableBufferPointer { ptr in
-            var audioBuffer = AudioBuffer(
-                mNumberChannels: UInt32(kChannels),
-                mDataByteSize: UInt32(ptr.count * MemoryLayout<Int16>.size),
-                mData: UnsafeMutableRawPointer(ptr.baseAddress)
-            )
-            var bufferList = AudioBufferList(mNumberBuffers: 1, mBuffers: audioBuffer)
-            var actionFlags: AudioUnitRenderActionFlags = []
-            var timestamp = AudioTimeStamp()
-            timestamp.mFlags = .sampleTimeValid
-            timestamp.mSampleTime = Float64(clock)
-            _ = deliver(&actionFlags, &timestamp, 0, UInt32(ptr.count), &bufferList, nil, nil)
-        }
-        inputSampleClock += Int64(samples.count)
+        var audioBuffer = AudioBuffer(
+            mNumberChannels: UInt32(kChannels),
+            mDataByteSize: UInt32(count * MemoryLayout<Int16>.size),
+            mData: UnsafeMutableRawPointer(mutating: buffer)
+        )
+        var bufferList = AudioBufferList(mNumberBuffers: 1, mBuffers: audioBuffer)
+        var actionFlags: AudioUnitRenderActionFlags = []
+        var timestamp = AudioTimeStamp()
+        timestamp.mFlags = .sampleTimeValid
+        timestamp.mSampleTime = Float64(clock)
+        _ = deliver(&actionFlags, &timestamp, 0, UInt32(count), &bufferList, nil, nil)
+        inputSampleClock += Int64(count)
     }
 
     // MARK: - Output: WebRTC → AVAudioEngine source node
