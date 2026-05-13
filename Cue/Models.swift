@@ -50,6 +50,19 @@ struct TranscriptSentence: Identifiable, Equatable {
     let start: Double
     let end: Double
     let words: [TranscriptWord]
+    /// Pre-computed " "-joined word text. Lets SentenceBlock render inactive
+    /// sentences as plain `Text` without re-concatenating words on every
+    /// `currentTime` tick.
+    let plainText: String
+
+    init(id: Int, speaker: String, start: Double, end: Double, words: [TranscriptWord]) {
+        self.id = id
+        self.speaker = speaker
+        self.start = start
+        self.end = end
+        self.words = words
+        self.plainText = words.map(\.text).joined(separator: " ")
+    }
 }
 
 struct Chapter: Identifiable, Equatable {

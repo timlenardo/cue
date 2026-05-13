@@ -288,9 +288,13 @@ private struct SentenceBlock: View {
         }
     }
 
-    /// Past / future sentence — flat paragraph, muted color.
+    /// Past / future sentence — flat paragraph, muted color. Uses the
+    /// pre-joined `plainText` so the per-tick body invocation doesn't have
+    /// to concatenate words into an AttributedString — there's no per-word
+    /// styling here, so a plain `Text(String)` is enough and the SwiftUI
+    /// diff stays a no-op when `activeWordIdx` changes upstream.
     private var plainParagraph: some View {
-        Text(makeAttributed())
+        Text(sentence.plainText)
             .font(.system(size: 21))
             .tracking(0.4)
             .lineSpacing(8)
@@ -340,13 +344,13 @@ private struct SentenceBlock: View {
     }
 
     /// Builds the AttributedString with the active word emphasized (white,
-    /// semibold, soft glow) inside an active sentence.
+    /// semibold, soft glow). Only called from `activeCard` — inactive
+    /// sentences render plain `Text(sentence.plainText)` instead.
     private func makeAttributed() -> AttributedString {
         var out = AttributedString()
         for (i, word) in sentence.words.enumerated() {
-            let isCurrent = isActive && word.globalIdx == activeWordIdx
             var seg = AttributedString(word.text)
-            if isCurrent {
+            if word.globalIdx == activeWordIdx {
                 seg.foregroundColor = .white
                 seg.font = .system(size: 21, weight: .semibold)
             }
