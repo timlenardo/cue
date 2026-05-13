@@ -170,14 +170,20 @@ final class AppState: ObservableObject {
     //
     // MicCapture and WakeWordEngine have *different* lifecycles:
     //
-    //   - MicCapture runs whenever the full PlayerView is on screen with
-    //     an episode loaded and the scene is active — INCLUDING during
-    //     voice mode. The unified pipeline (CueAudioDevice) needs the
-    //     engine alive to render WebRTC's TTS output through
-    //     `mainMixerNode`. Stopping it on voice-mode entry breaks playback.
+    //   - MicCapture runs whenever the player is open with an episode
+    //     loaded — REGARDLESS of scene phase or voice-mode state. It
+    //     must stay alive through:
+    //       - voice mode (CueAudioDevice reads its buffers to send to
+    //         OpenAI and renders TTS back through its mainMixerNode)
+    //       - background / lock-screen (so an in-flight conversation
+    //         continues, and so SwiftUI scenePhase flapping on innocuous
+    //         events like Control Center / notifications doesn't cycle
+    //         the engine off-and-on)
     //
-    //   - WakeWordEngine only listens in playback mode (voiceOpen == false).
-    //     The assistant's TTS shouldn't be re-detected as a wake phrase.
+    //   - WakeWordEngine listens only when the user is actively in the
+    //     foreground (`scenePhaseActive`) and not already in voice mode.
+    //     Wake-word detection in background is undesirable (battery +
+    //     privacy + the AI's TTS shouldn't self-trigger).
 
     /// Called by RootView on scene-phase transitions.
     func sceneDidChange(active: Bool) {
@@ -188,8 +194,8 @@ final class AppState: ObservableObject {
     /// Reconcile MicCapture + WakeWordEngine to the current UI state.
     /// Idempotent. Called from every state transition that affects either.
     private func updateWakeArmed() {
-        let shouldRunMic = live != nil && playerOpen && scenePhaseActive
-        let shouldArmWake = shouldRunMic && !voiceOpen
+        let shouldRunMic = live != nil && playerOpen
+        let shouldArmWake = shouldRunMic && scenePhaseActive && !voiceOpen
 
         if shouldRunMic != micArmedForWake {
             micArmedForWake = shouldRunMic
