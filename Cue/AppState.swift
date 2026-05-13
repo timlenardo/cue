@@ -508,7 +508,8 @@ final class AppState {
                 durationSeconds: item.episode.durationSeconds,
                 pubDate: item.episode.episodePubDate,
                 guid: item.episode.episodeGuid ?? "",
-                description: item.episode.episodeDescription
+                description: item.episode.episodeDescription,
+                artworkUrl: item.episode.episodeArtworkUrl ?? item.episode.showArtworkUrl
             )
             loadLive(
                 LiveEpisode(show: show, episode: episode, transcript: transcript, serverEpisodeId: item.episode.id),
