@@ -22,7 +22,7 @@ struct EntryView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Brand row
             HStack(spacing: 10) {
-                Text("Cue")
+                Text("Orbit")
                     .font(Fonts.serif(28, weight: .medium))
                     .tracking(-0.5)
                     .foregroundStyle(palette.ink)
@@ -73,7 +73,7 @@ struct EntryView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 14) {
                     pasteCard
-                    Text("Cue resolves the link, transcribes the audio with Whisper, then plays it back. Today: Spotify, Apple Podcasts, RSS.")
+                    Text("Orbit resolves the link, transcribes the audio with Whisper, then plays it back. Today: Spotify, Apple Podcasts, RSS.")
                         .font(Fonts.sans(11))
                         .lineSpacing(3)
                         .multilineTextAlignment(.center)

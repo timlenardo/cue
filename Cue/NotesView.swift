@@ -19,7 +19,7 @@ struct NotesView: View {
             .padding(.horizontal, 22)
             .padding(.top, 8)
 
-            Text("Moments you asked Cue to save while listening.")
+            Text("Moments you asked Orbit to save while listening.")
                 .font(Fonts.sans(12.5))
                 .foregroundStyle(palette.inkMuted)
                 .lineSpacing(2)
@@ -177,7 +177,7 @@ private struct NotesEmptyState: View {
             Text("No saved moments yet")
                 .font(Fonts.sans(15, weight: .semibold))
                 .foregroundStyle(palette.ink)
-            Text("Say \u{201C}Cue, save this\u{201D} while you\u{2019}re listening and the moment will land here.")
+            Text("Say \u{201C}Orbit, save this\u{201D} while you\u{2019}re listening and the moment will land here.")
                 .font(Fonts.sans(12.5))
                 .foregroundStyle(palette.inkMuted)
                 .multilineTextAlignment(.center)

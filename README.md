@@ -1,8 +1,8 @@
-# Cue — voice realtime branch setup
+# Orbit — voice realtime branch setup
 
 This branch (`ios-voice-realtime`) replaces the simulated `VoiceAgentView`
 with a real OpenAI Realtime voice loop over WebRTC. It builds on the
-on-device wake-word integration (say "QQ" or "Cue Cue" to open the
+on-device wake-word integration (say "Orbit" to open the
 voice agent) that was already WIP on `main`.
 
 > **Adding a realtime voice tool?** See [AGENTS.md](./AGENTS.md#adding-a-new-realtime-tool) for the end-to-end checklist across this repo + cue-server. Five touchpoints; skipping any one fails silently.
@@ -87,7 +87,7 @@ You'll be hitting the deployed `cue-dev` Heroku app, so the phone needs internet
 ### Talk to it
 There are two ways to start a session:
 - **Tap the mic button** (next to play/pause in the player UI), OR
-- **Say the wake phrase** out loud — current triggers are `qq`, `cue cue`, `queue queue`, `kew kew`, `hey cue`, `hey q[ueue]?`. On-device Whisper transcribes the mic continuously and fires `AppState.openMic()` on match. Extend the regex in `Cue/Wake/WakeWordEngine.swift` to add aliases.
+- **Say the wake phrase** out loud — current triggers are `orbit`, `orbits`, `orbital`. On-device Whisper transcribes the mic continuously and fires `AppState.openMic()` on match. Extend the regex in `Cue/Wake/WakeWordEngine.swift` to add aliases.
 
 What you should see:
 1. Podcast pauses, voice agent sheet slides up.
@@ -113,7 +113,7 @@ What you should see:
 |---|---|
 | Build fails with `no such module 'WebRTC'` or `'WhisperKit'` | SwiftPM resolution didn't finish. File → Packages → Reset Package Caches, then Resolve Package Versions. Also confirm both products are linked to the Cue target (Target → General → Frameworks, Libraries, and Embedded Content). |
 | Phone refuses to launch app ("Untrusted Developer") | Settings → General → VPN & Device Management → trust your Apple ID. |
-| Wake word never fires | Check **Settings → Cue → Microphone** is on; check Console for `wake` errors. First launch downloads the Whisper tiny.en model (~75 MB) from HuggingFace — needs internet once. |
+| Wake word never fires | Check **Settings → Orbit → Microphone** is on; check Console for `wake` errors. First launch downloads the Whisper tiny.en model (~75 MB) from HuggingFace — needs internet once. |
 | Voice session stuck on "Connecting…" | Check Console for `RealtimeVoice` and `CueAPI` errors. Usual causes: phone offline, JWT expired (sign out + back in), or cue-dev down (try `curl https://cue-dev-7bd3eabd5817.herokuapp.com/v1/health/`). |
 | Voice session connects but you hear nothing | iOS audio session quirk — check the speaker isn't muted via the side switch, and make sure no other app held the mic. |
 | "Load an episode to talk" empty state | You hit the mic without loading a live episode (canned-sample mode). Paste a podcast URL on the home screen first. |

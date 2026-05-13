@@ -18,7 +18,7 @@ struct AuthView: View {
             palette.bg.ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Cue")
+                Text("Orbit")
                     .font(Fonts.serif(28, weight: .medium))
                     .tracking(-0.5)
                     .foregroundStyle(palette.ink)

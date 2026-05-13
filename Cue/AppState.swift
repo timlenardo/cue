@@ -412,7 +412,7 @@ final class AppState {
     // Simple rule: MicCapture + WakeWordEngine run as long as an episode
     // is loaded. Both stay alive through:
     //   - background / lock-screen (driving with a locked phone: user
-    //     should be able to say "qq" / "cue cue" and trigger voice mode
+    //     should be able to say "orbit" and trigger voice mode
     //     without unlocking)
     //   - SwiftUI scenePhase flapping on innocuous events
     //   - mini-player vs full-player view changes

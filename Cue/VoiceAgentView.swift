@@ -102,7 +102,7 @@ private struct VoiceAgentLiveBody: View {
             HStack(spacing: 10) {
                 MicHalo(phase: phase, accent: palette.accent)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("CUE")
+                    Text("ORBIT")
                         .font(Fonts.sans(11, weight: .semibold))
                         .tracking(0.6)
                         .foregroundStyle(palette.accent)
@@ -133,7 +133,7 @@ private struct VoiceAgentEmptyBody: View {
                 HStack(spacing: 10) {
                     MicHalo(phase: .done, accent: palette.accent)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("CUE")
+                        Text("ORBIT")
                             .font(Fonts.sans(11, weight: .semibold))
                             .tracking(0.6)
                             .foregroundStyle(palette.accent)
@@ -146,7 +146,7 @@ private struct VoiceAgentEmptyBody: View {
                 CloseButton(palette: palette) { state.closeVoiceAgent() }
             }
 
-            Text("Paste a podcast URL on the home screen to load a transcript, then ask Cue about it.")
+            Text("Paste a podcast URL on the home screen to load a transcript, then ask Orbit about it.")
                 .font(Fonts.sans(15))
                 .foregroundStyle(palette.inkMuted)
                 .multilineTextAlignment(.leading)
