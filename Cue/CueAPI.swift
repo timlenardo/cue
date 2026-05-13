@@ -333,7 +333,12 @@ final class CueAPI {
         log.info("CueAPI init — baseURL=\(Self.baseURL.absoluteString, privacy: .public) hasToken=\(self.token != nil)")
     }
 
-    var isAuthenticated: Bool { token != nil }
+    var isAuthenticated: Bool {
+        #if DEBUG
+        if UITestFlag.bypassAuth { return true }
+        #endif
+        return token != nil
+    }
 
     // MARK: - Auth
 

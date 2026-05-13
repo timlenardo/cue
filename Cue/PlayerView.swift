@@ -274,6 +274,7 @@ private struct TranscriptScrollView: View {
                             notes: notesById[sentence.id] ?? []
                         )
                         .id(sentence.id)
+                        .accessibilityIdentifier("transcriptSentence_\(sentence.id)")
                     }
 
                     // Continuation hint.
@@ -292,6 +293,7 @@ private struct TranscriptScrollView: View {
                 .scrollTargetLayout()
             }
             .scrollPosition(id: $scrollTopId, anchor: UnitPoint(x: 0.5, y: 0.32))
+            .accessibilityIdentifier("transcriptScroll")
             .mask(
                 LinearGradient(
                     stops: [
