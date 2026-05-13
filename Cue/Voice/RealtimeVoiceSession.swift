@@ -157,16 +157,19 @@ final class RealtimeVoiceSession: NSObject {
     }
 
     /// One-pole low-pass into the published levels so the UI breathes
-    /// instead of strobing on every 20 Hz tick. Skips the assignment when
-    /// the smoothed delta is below the visible threshold — @Observable
-    /// mutations fire `withMutation` regardless of whether the value
-    /// actually changed, so deduping here avoids invalidating any view
-    /// that reads `inputLevel` / `outputLevel` (the orb + waveform) 20
-    /// times per second of silence.
+    /// instead of strobing on every 20 Hz tick. `outputLevel` is smoothed
+    /// more aggressively (lower alpha) — the waveform reads better with a
+    /// more lyrical level signal vs the orb's tighter mic tracking. Skips
+    /// the assignment when the smoothed delta is below the visible
+    /// threshold — @Observable mutations fire `withMutation` regardless of
+    /// whether the value actually changed, so deduping here avoids
+    /// invalidating any view that reads `inputLevel` / `outputLevel` (the
+    /// orb + waveform) 20 times per second of silence.
     private func applyLevels(input: Float, output: Float) {
-        let alpha: Float = 0.4
-        let nextIn  = inputLevel  + (input  - inputLevel)  * alpha
-        let nextOut = outputLevel + (output - outputLevel) * alpha
+        let inputAlpha: Float = 0.4
+        let outputAlpha: Float = 0.26
+        let nextIn  = inputLevel  + (input  - inputLevel)  * inputAlpha
+        let nextOut = outputLevel + (output - outputLevel) * outputAlpha
         if abs(nextIn  - inputLevel)  > 0.001 { inputLevel  = nextIn  }
         if abs(nextOut - outputLevel) > 0.001 { outputLevel = nextOut }
     }
