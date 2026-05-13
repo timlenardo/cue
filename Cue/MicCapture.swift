@@ -76,6 +76,14 @@ final class MicCapture {
     /// keyed by ObjectIdentifier so callers can detach by node reference.
     private var registeredOutputSources: [ObjectIdentifier: (node: AVAudioSourceNode, format: AVAudioFormat)] = [:]
 
+    /// Fires once after every successful `bringUpEngine` (initial start,
+    /// route change, interruption recovery). Subscribers (e.g. WebRTC's
+    /// custom ADM) use this to invalidate any per-engine assumptions —
+    /// most importantly to call `notifyAudioInputInterrupted` on their
+    /// delegate so the framework knows the audio render thread may have
+    /// shifted.
+    @MainActor var onEngineRebuild: (@MainActor () -> Void)?
+
     private init() {
         permission = currentPermission()
         installInterruptionObserver()
@@ -265,6 +273,10 @@ final class MicCapture {
             try engine.start()
             isCapturing = true
             print("[MicCapture] started — \(Int(format.sampleRate))Hz, \(format.channelCount)ch, vp=\(voiceProcessingActive)")
+            // Fire AFTER engine.start succeeds, so subscribers can rely on
+            // the engine being live (e.g., re-attached source nodes are
+            // already producing samples from the new audio render thread).
+            onEngineRebuild?()
         } catch {
             print("[MicCapture] engine.start() failed: \(error)")
             input.removeTap(onBus: 0)

@@ -251,28 +251,6 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         self.dataChannel = dc
     }
 
-    private func configureAudioSessionForWebRTC() {
-        // .videoChat + .defaultToSpeaker matches the podcast player's route
-        // policy: loud speaker when nothing else is connected, but iOS
-        // routes to wired earphones / Bluetooth / AirPlay automatically
-        // when they are. Do NOT call overrideOutputAudioPort(.speaker) —
-        // that forces the loudspeaker even with headphones plugged in.
-        let webRTCConfig = RTCAudioSessionConfiguration.webRTC()
-        webRTCConfig.category = AVAudioSession.Category.playAndRecord.rawValue
-        webRTCConfig.categoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay, .defaultToSpeaker]
-        webRTCConfig.mode = AVAudioSession.Mode.videoChat.rawValue
-        RTCAudioSessionConfiguration.setWebRTC(webRTCConfig)
-
-        let session = RTCAudioSession.sharedInstance()
-        session.lockForConfiguration()
-        defer { session.unlockForConfiguration() }
-        do {
-            try session.setConfiguration(webRTCConfig, active: true)
-        } catch {
-            log.error("RTCAudioSession config failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
     private func registerInterruptionObserver() {
         let center = NotificationCenter.default
         interruptionObserver = center.addObserver(

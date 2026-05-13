@@ -31,7 +31,10 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     private let kSampleRate: Double = 48_000
     private let kChannels: Int = 1
     private let kIOBufferDuration: TimeInterval = 0.01   // 10 ms
-    private let kFramesPerChunk: Int = 480               // 10 ms at 48 kHz
+    /// Derived from sample rate × buffer duration so the two constants
+    /// can't drift independently (changing sample rate without updating
+    /// the frame count would silently break the 10 ms chunking).
+    private var kFramesPerChunk: Int { Int(kSampleRate * kIOBufferDuration) }
 
     var deviceInputSampleRate: Double { kSampleRate }
     var inputIOBufferDuration: TimeInterval { kIOBufferDuration }
@@ -78,7 +81,6 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     /// Lifecycle: created in `startPlayout`, registered with MicCapture,
     /// unregistered + nilled in `stopPlayout`.
     private var outputSourceNode: AVAudioSourceNode?
-    private var outputFormat: AVAudioFormat?
 
     // MARK: - Input pipeline state
 
@@ -86,6 +88,13 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     private var inputConverter: AVAudioConverter?
     private var inputTargetFormat: AVAudioFormat?
     private var inputRing: [Int16] = []
+    /// Pooled output buffer for AVAudioConverter — sized once on first
+    /// use and reused for every mic buffer to keep the audio render thread
+    /// allocation-free. The converter overwrites `frameLength` on each call.
+    /// Capacity covers MicCapture's 4096-frame tap at any reasonable
+    /// resampling ratio (worst case ~8192 at a 2x upsample, which we never
+    /// hit since both sides are 48 kHz).
+    private var inputConvertBuffer: AVAudioPCMBuffer?
 
     // MARK: - Init
 
@@ -130,11 +139,36 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
         self.deliverRecordedData = delegate.deliverRecordedData
         self.getPlayoutData = delegate.getPlayoutData
         _isInitialized = true
+        // Subscribe to MicCapture engine rebuilds (route change, interruption
+        // recovery). WebRTC's ADM expects its consumer thread to be stable
+        // until notifyAudioInputInterrupted fires — every engine rebuild
+        // creates a fresh audio render thread, so we notify the framework.
+        Task { @MainActor in
+            MicCapture.shared.onEngineRebuild = { [weak self] in
+                self?.handleEngineRebuild()
+            }
+        }
         return true
     }
 
     func terminateDevice() -> Bool {
         log.info("terminate")
+        // Belt-and-suspenders cleanup: if WebRTC drops `stopPlayout` and
+        // jumps straight to `terminateDevice`, the source node would stay
+        // registered in MicCapture's dict until our deinit fires later.
+        // Symmetric cleanup here keeps the dict tidy regardless of order.
+        if let source = outputSourceNode {
+            let nodeRef = source
+            Task { @MainActor in
+                MicCapture.shared.unregisterOutputSource(nodeRef)
+                MicCapture.shared.onEngineRebuild = nil
+            }
+            outputSourceNode = nil
+        } else {
+            Task { @MainActor in
+                MicCapture.shared.onEngineRebuild = nil
+            }
+        }
         delegate = nil
         deliverRecordedData = nil
         getPlayoutData = nil
@@ -176,6 +210,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
             self.inputRing.removeAll(keepingCapacity: true)
             self.inputConverter = nil
             self.inputTargetFormat = nil
+            self.inputConvertBuffer = nil
         }
         _isRecording = false
         return true
@@ -200,7 +235,6 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
             log.error("startPlayout: failed to build playback format")
             return false
         }
-        outputFormat = format
         let source = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
             return self?.renderPlayout(frameCount: frameCount, audioBufferList: audioBufferList) ?? noErr
         }
@@ -222,7 +256,6 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
             }
         }
         outputSourceNode = nil
-        outputFormat = nil
         _isPlaying = false
         return true
     }
@@ -233,6 +266,21 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     func notifyAudioOutputParametersChange() {}
     func notifyAudioInputInterrupted() {}
     func notifyAudioOutputInterrupted() {}
+
+    /// Called on the main actor by MicCapture every time `bringUpEngine`
+    /// succeeds. Forwards a thread-shift notification to WebRTC's ADM
+    /// delegate per its "same-thread until notifyAudioInterrupted" rule.
+    /// The notify calls themselves must run inside a dispatchAsync block,
+    /// per the RTCAudioDeviceDelegate contract.
+    @MainActor
+    private func handleEngineRebuild() {
+        log.info("handleEngineRebuild — notifying WebRTC ADM that audio thread may have shifted")
+        dispatchAsync { [weak self] in
+            guard let self else { return }
+            self.delegate?.notifyAudioInputInterrupted()
+            self.delegate?.notifyAudioOutputInterrupted()
+        }
+    }
 
     func dispatchAsync(_ block: @escaping () -> Void) {
         admQueue.async(execute: block)
@@ -264,11 +312,17 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
 
         if inputConverter == nil || inputConverter?.inputFormat != buffer.format {
             inputConverter = AVAudioConverter(from: buffer.format, to: targetFormat)
+            inputConvertBuffer = nil   // re-pool with the new target format
         }
         guard let converter = inputConverter else { return }
 
-        let outFrames = AVAudioFrameCount(Double(buffer.frameLength) * kSampleRate / buffer.format.sampleRate)
-        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outFrames) else { return }
+        // Pool the conversion buffer to avoid allocating on the render thread.
+        // 8192 covers MicCapture's 4096-frame tap at any practical sample-rate
+        // ratio (both sides are 48 kHz today, so it's 1:1).
+        if inputConvertBuffer == nil {
+            inputConvertBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 8192)
+        }
+        guard let outBuffer = inputConvertBuffer else { return }
 
         var error: NSError?
         let status = converter.convert(to: outBuffer, error: &error) { _, outStatus in
