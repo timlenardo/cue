@@ -5,6 +5,7 @@ struct EntryView: View {
     @Environment(CueAPI.self) private var api
 
     @State private var url: String = ""
+    @State private var showOrbDebug = false
     @FocusState private var urlFieldFocused: Bool
 
     private func detectPlatform(_ raw: String) -> String? {
@@ -26,6 +27,14 @@ struct EntryView: View {
                     .tracking(-0.5)
                     .foregroundStyle(palette.ink)
                 Spacer()
+                Button { showOrbDebug = true } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(palette.ink)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(palette.subtle))
+                }
+                .buttonStyle(.plain)
                 Button { state.settingsOpen = true } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 18, weight: .regular))
@@ -82,6 +91,9 @@ struct EntryView: View {
         .background(palette.bg.ignoresSafeArea())
         .contentShape(Rectangle())
         .onTapGesture { urlFieldFocused = false }
+        .sheet(isPresented: $showOrbDebug) {
+            LiquidOrbDebugView()
+        }
     }
 
     // MARK: - Paste card
