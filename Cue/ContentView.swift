@@ -104,13 +104,21 @@ private struct AudioSessionDebugHUD: View {
             let session = AVAudioSession.sharedInstance()
             let mode = Self.modeLabel(session.mode)
             #if os(iOS)
-            let vp = MicCapture.shared.isVoiceProcessingActive
+            let vpIntent = MicCapture.shared.isVoiceProcessingActive
+            let vpLive = MicCapture.shared.isVoiceProcessingEnabledLive
             #else
-            let vp = false
+            let vpIntent = false
+            let vpLive = false
             #endif
+            // Show live state primarily; flag when our intent flag and the
+            // input node's actual state disagree — that's the bug pattern
+            // we added this HUD to surface.
+            let vpLabel = vpIntent == vpLive
+                ? (vpLive ? "on" : "off")
+                : "\(vpLive ? "on" : "off") ⚠︎ intent=\(vpIntent ? "on" : "off")"
             VStack(alignment: .leading, spacing: 2) {
                 Text("mode: \(mode)")
-                Text("VPIO: \(vp ? "on" : "off")")
+                Text("VPIO: \(vpLabel)")
             }
             .font(Fonts.mono(11, weight: .medium))
             .foregroundStyle(.white)
