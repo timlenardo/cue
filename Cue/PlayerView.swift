@@ -40,9 +40,21 @@ struct PlayerView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .ignoresSafeArea(edges: .bottom)
-            .opacity(state.voiceOpen ? 0.25 : 1)
             .allowsHitTesting(!state.voiceOpen)
             .animation(.easeInOut(duration: 0.25), value: state.voiceOpen)
+
+            // Voice-mode shade: a fully opaque black panel that covers
+            // the player content while the agent is open. Sits below the
+            // VoiceAgentView (zIndex 50) and below the bottom controls
+            // strip (zIndex 60) so the morphing scrubber + orb stay on
+            // top, but blocks the header/transcript completely.
+            if state.voiceOpen {
+                Color.black
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                    .zIndex(45)
+                    .allowsHitTesting(false)
+            }
 
             // Voice shade — sits above header/transcript so the upper UI
             // reads as "covered". Bottom controls strip is lifted above this
@@ -73,7 +85,7 @@ struct PlayerView: View {
                     PrimaryControls()
                     ZStack {
                         SecondaryRow()
-                            .opacity(state.voiceOpen ? 0.15 : 1)
+                            .opacity(state.voiceOpen ? 0 : 1)
                             .allowsHitTesting(!state.voiceOpen)
                         // Resume button — sits in the listening pill's slot,
                         // fades in alongside the orb/waveform when phase 2
@@ -419,10 +431,14 @@ private struct ProgressBar: View {
             GeometryReader { proxy in
                 let w = proxy.size.width
                 ZStack(alignment: .leading) {
+                    // Background track — visible only outside voice mode.
+                    // In voiceOpen the waveform takes over the slot entirely,
+                    // so showing the dim grey rail underneath was a leak.
                     Capsule()
                         .fill(Ambient.trackBase)
                         .frame(height: 4)
                         .frame(maxHeight: .infinity, alignment: .center)
+                        .opacity(voiceOpen ? 0 : 1)
 
                     if morphActive {
                         VoiceWaveformBar(
@@ -495,7 +511,7 @@ private struct ProgressBar: View {
                         .lineLimit(1)
                 }
             }
-            .opacity(voiceOpen ? 0.15 : 1)
+            .opacity(voiceOpen ? 0 : 1)
             .animation(.easeInOut(duration: 0.25), value: voiceOpen)
         }
     }
@@ -560,13 +576,13 @@ private struct PrimaryControls: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .opacity(voiceOpen ? 0.15 : 1)
+            .opacity(voiceOpen ? 0 : 1)
             .allowsHitTesting(!voiceOpen)
 
             Spacer(minLength: 0)
 
             SkipButton(direction: .back) { state.skipBack15() }
-                .opacity(voiceOpen ? 0.15 : 1)
+                .opacity(voiceOpen ? 0 : 1)
                 .allowsHitTesting(!voiceOpen)
 
             Spacer(minLength: 0)
@@ -591,7 +607,7 @@ private struct PrimaryControls: View {
             Spacer(minLength: 0)
 
             SkipButton(direction: .forward) { state.skipFwd15() }
-                .opacity(voiceOpen ? 0.15 : 1)
+                .opacity(voiceOpen ? 0 : 1)
                 .allowsHitTesting(!voiceOpen)
 
             Spacer(minLength: 0)
@@ -605,7 +621,7 @@ private struct PrimaryControls: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .opacity(voiceOpen ? 0.15 : 1)
+            .opacity(voiceOpen ? 0 : 1)
             .allowsHitTesting(!voiceOpen)
         }
         .animation(.easeInOut(duration: 0.25), value: voiceOpen)
@@ -837,7 +853,7 @@ private struct VoiceOrb: View {
             if let session {
                 VoiceOrbLive(session: session, onTap: onTap)
             } else {
-                VoiceOrbCore(level: 0, onTap: onTap)
+                VoiceOrbCore(level: 0, isListening: false, onTap: onTap)
             }
         }
         .frame(width: 96, height: 96)
@@ -851,13 +867,19 @@ private struct VoiceOrbLive: View {
     var body: some View {
         // Mic-only signal: the orb is the user's mouth, never the AI's.
         // It bounces during .listening and stays still otherwise.
-        let level: Float = session.phase == .listening ? session.inputLevel : 0
-        VoiceOrbCore(level: level, onTap: onTap)
+        let isListening = session.phase == .listening
+        let level: Float = isListening ? session.inputLevel : 0
+        VoiceOrbCore(level: level, isListening: isListening, onTap: onTap)
     }
 }
 
 private struct VoiceOrbCore: View {
     let level: Float
+    /// True when the agent is in the listening phase — i.e. the orb is
+    /// the user's mic indicator. When false (assistant turn, idle), the
+    /// green halo is reduced to a faint trace so the screen isn't washed
+    /// in glow while the agent is the one talking.
+    let isListening: Bool
     let onTap: () -> Void
 
     // "Galaxy" preset from the debug view, with the user-tuned overrides:
@@ -875,14 +897,24 @@ private struct VoiceOrbCore: View {
     private static let highlightRotationDegPerSec: Double = 150
     private static let haloMorphSpeedFactor: Double = -0.78
     private static let haloSize: CGFloat = 150
-    private static let haloBlur: CGFloat = 24
-    private static let haloOpacityBase: Double = 0.35
-    private static let haloOpacityPerLevel: Double = 0.55
+    private static let haloBlur: CGFloat = 12
+    /// Halo opacity when the agent isn't listening (assistant turn or
+    /// idle) or the mic is below the noise floor. A faint baseline so
+    /// the orb keeps its soft green ambient presence even when the
+    /// user isn't speaking — the strong "active" glow still comes from
+    /// the level-driven ramp during listening.
+    private static let haloOpacityIdle: Double = 0.05
+    /// Envelope time constants for the halo's appear/disappear. Longer
+    /// than the core morph's attack/release so the green glow swells in
+    /// and decays slowly instead of strobing with every syllable.
+    private static let haloAttackSec: Double = 0.55
+    private static let haloReleaseSec: Double = 1.1
     private static let haloScalePerLevel: Double = 0.12
     private static let coreSize: CGFloat = 88
     private static let coreScalePerLevel: Double = 0.18
 
     @State private var envelope = VoiceOrbEnvelope()
+    @State private var haloEnvelope = VoiceOrbEnvelope()
 
     var body: some View {
         Button(action: onTap) {
@@ -895,7 +927,20 @@ private struct VoiceOrbCore: View {
                     attackSec: Self.attackSec,
                     releaseSec: Self.releaseSec
                 )
-                liquidOrb(time: t, amp: amp)
+                // Target halo opacity — same level→glow mapping as before,
+                // but routed through a separate envelope so the actual
+                // displayed opacity ramps over halo attack/release rather
+                // than tracking the 20 Hz input level directly.
+                let haloTarget: Double = isListening
+                    ? min(0.9, Double(level) * 5.0)
+                    : Self.haloOpacityIdle
+                let haloOpacity = haloEnvelope.tick(
+                    now: t,
+                    target: haloTarget,
+                    attackSec: Self.haloAttackSec,
+                    releaseSec: Self.haloReleaseSec
+                )
+                liquidOrb(time: t, amp: amp, haloOpacity: haloOpacity)
             }
             .frame(width: 96, height: 96)
             .contentShape(Circle())
@@ -904,19 +949,26 @@ private struct VoiceOrbCore: View {
     }
 
     @ViewBuilder
-    private func liquidOrb(time t: TimeInterval, amp: Double) -> some View {
+    private func liquidOrb(time t: TimeInterval, amp: Double, haloOpacity: Double) -> some View {
         let core = blobCorners(t: t, amp: amp)
         // Halo runs the morph in reverse and slightly slower — gives the
         // outer glow its own rhythm so it never tracks the core exactly.
         let halo = blobCorners(t: t * Self.haloMorphSpeedFactor, amp: amp)
 
         ZStack {
-            // Sage-green liquid halo behind the core.
+            // Sage-green liquid halo behind the core. Lights up only
+            // while the user is actually speaking; ramped through
+            // `haloEnvelope` (computed in the body) so it swells in
+            // gradually rather than tracking the raw input level. When
+            // `haloOpacity == 0` (the assistant is replying), SwiftUI
+            // skips rendering the chain entirely — same effect as
+            // removing the view from the tree, without confusing the
+            // ViewBuilder's type inference on the long modifier chain.
             LiquidMorphShape(corners: halo)
                 .fill(Ambient.accent)
                 .frame(width: Self.haloSize, height: Self.haloSize)
                 .blur(radius: Self.haloBlur)
-                .opacity(Self.haloOpacityBase + Double(level) * Self.haloOpacityPerLevel)
+                .opacity(haloOpacity)
                 .scaleEffect(1.0 + CGFloat(level) * CGFloat(Self.haloScalePerLevel))
 
             // Core blob with rotating inner highlight.
@@ -1042,7 +1094,7 @@ private struct VoiceWaveformBar: View {
         if let session {
             VoiceWaveformBarLive(session: session, color: color, glow: glow)
         } else {
-            VoiceWaveformBarCore(active: false, level: 0, color: color, glow: glow)
+            VoiceWaveformBarCore(level: 0, color: color, glow: glow)
         }
     }
 }
@@ -1053,24 +1105,38 @@ private struct VoiceWaveformBarLive: View {
     let glow: Color
 
     var body: some View {
-        // Activate only when the assistant is actually speaking AND the
-        // WebRTC receiver is delivering non-trivial audio. The threshold
-        // filters out idle hiss between turns.
-        let active = session.phase == .speaking && session.outputLevel > 0.02
-        VoiceWaveformBarCore(
-            active: active,
-            level: active ? session.outputLevel : 0,
-            color: color,
-            glow: glow
-        )
+        // Drive amplitude + glow from the assistant's TTS output level.
+        // When the assistant is silent (user's turn or between replies),
+        // level → 0, the wave collapses to a flat green line, and the
+        // glow fades out — so the bar stays present in agent mode but
+        // only "lights up" while the assistant is replying.
+        let level: Float = session.phase == .speaking ? session.outputLevel : 0
+        VoiceWaveformBarCore(level: level, color: color, glow: glow)
     }
 }
 
 private struct VoiceWaveformBarCore: View {
-    let active: Bool
     let level: Float
     let color: Color
     let glow: Color
+
+    // Render the canvas taller than the 22pt scrubber slot so the wave's
+    // peaks (and now the very wide outer halo shadow at radius 180)
+    // aren't clipped at the top/bottom. The caller's .frame(22) still
+    // drives the surrounding layout — the canvas just overflows
+    // visually above and below the strip. Sized so peak wave amplitude
+    // (~40pt from mid) plus the widest shadow radius (~180pt) lands
+    // inside the canvas frame, with headroom for the shadow falloff.
+    private static let renderHeight: CGFloat = 440
+    // Calibrated against the original 22pt visual amplitude so the wave
+    // reads the same size even though the canvas is much taller.
+    private static let ampPixelScale: Double = 22.0
+    // Horizontal canvas extension on each side. The shadow filter blurs
+    // outward from the path; without slack, the glow at x=0 and x=width
+    // gets clipped to the canvas edge, leaving the ends of the bar
+    // visibly truncated. Sized to match the widest shadow pass
+    // (radius 180) plus a little falloff headroom.
+    private static let glowMargin: CGFloat = 200
 
     var body: some View {
         TimelineView(.animation) { context in
@@ -1084,16 +1150,35 @@ private struct VoiceWaveformBarCore: View {
             let gated = max(0, Double(level) - threshold) / (1 - threshold)
             let boosted = min(1.0, gated * 3.0)
             let amp = pow(boosted, 0.85)
+            // Glow scales with output level — no glow on the flat resting
+            // line; ramps in quickly as soon as the assistant starts
+            // speaking. `* 12` makes the ramp aggressive so even quiet
+            // syllables push the bar to full glow almost immediately.
+            // Four passes now: a sharp inner core, a mid bloom, a wide
+            // outer halo, and a super-wide atmospheric spill — sized to
+            // give the line a "filled-blob" presence comparable to the
+            // 150 pt orb halo on the listening side.
+            let glowAlpha = min(1.0, max(0.0, Double(level) * 100.0))
+            let bloomAlpha = glowAlpha
+            let haloAlpha = glowAlpha
+            let atmosphereAlpha = glowAlpha * 0.85
             Canvas { ctx, size in
                 let mid = Double(size.height) / 2
-                let baseAmp = amp * Double(size.height) * 1.193
-                let widthD = Double(size.width)
+                let baseAmp = amp * Self.ampPixelScale * 1.193
+                // The Canvas is wider than the layout slot by 2 × glowMargin
+                // (via negative horizontal padding below). Inset the path's
+                // x range by glowMargin on each side so the visible bar
+                // stays aligned with the original 22pt strip while the
+                // shadow blur has room to render past the visible edges.
+                let leftEdge = Double(Self.glowMargin)
+                let rightEdge = Double(size.width) - Double(Self.glowMargin)
+                let visibleWidth = max(1.0, rightEdge - leftEdge)
                 var path = Path()
                 let step: Double = 1.0
-                var x: Double = 0
-                path.move(to: CGPoint(x: 0, y: mid))
-                while x <= widthD {
-                    let n = x / max(widthD, 1)
+                var x: Double = leftEdge
+                path.move(to: CGPoint(x: leftEdge, y: mid))
+                while x <= rightEdge {
+                    let n = (x - leftEdge) / visibleWidth
                     // Plain sin damping — broader active region than pow(sin, 1.5).
                     let edgeDamping = sin(n * .pi)
                     // Pixel-based frequencies, no division on the composite
@@ -1107,14 +1192,50 @@ private struct VoiceWaveformBarCore: View {
                     path.addLine(to: CGPoint(x: x, y: y))
                     x += step
                 }
-                // Soft outer glow pass.
-                ctx.drawLayer { layer in
-                    layer.addFilter(.shadow(color: glow.opacity(0.8), radius: 10))
-                    layer.stroke(
-                        path,
-                        with: .color(color),
-                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
-                    )
+                if glowAlpha > 0 {
+                    // All four passes stroke the same 2.5 pt line — the
+                    // visible line stays exactly as wide as the bare
+                    // inner pass. What grows is the *halo*: each layer
+                    // applies a wider/softer shadow, so the green bloom
+                    // around the line gets wider and brighter without
+                    // thickening the line itself.
+                    //
+                    // Atmospheric spill — widest, softest, room-filling.
+                    ctx.drawLayer { layer in
+                        layer.addFilter(.shadow(color: glow.opacity(atmosphereAlpha), radius: 40))
+                        layer.stroke(
+                            path,
+                            with: .color(color.opacity(0.85)),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                        )
+                    }
+                    // Wide halo — substantial green body around the line.
+                    ctx.drawLayer { layer in
+                        layer.addFilter(.shadow(color: glow.opacity(haloAlpha), radius: 20))
+                        layer.stroke(
+                            path,
+                            with: .color(color.opacity(0.95)),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                        )
+                    }
+                    // Mid bloom — saturated near-line halo.
+                    ctx.drawLayer { layer in
+                        layer.addFilter(.shadow(color: glow.opacity(bloomAlpha), radius: 10))
+                        layer.stroke(
+                            path,
+                            with: .color(color),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                        )
+                    }
+                    // Inner glow — tight, bright halo hugging the line.
+                    ctx.drawLayer { layer in
+                        layer.addFilter(.shadow(color: glow.opacity(glowAlpha), radius: 5))
+                        layer.stroke(
+                            path,
+                            with: .color(color),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                        )
+                    }
                 }
                 // Sharp inner pass on top for definition.
                 ctx.stroke(
@@ -1123,9 +1244,9 @@ private struct VoiceWaveformBarCore: View {
                     style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
                 )
             }
+            .frame(height: Self.renderHeight)
+            .padding(.horizontal, -Self.glowMargin)
         }
-        .opacity(active ? 1 : 0)
-        .animation(.easeInOut(duration: 0.25), value: active)
         .allowsHitTesting(false)
     }
 }
