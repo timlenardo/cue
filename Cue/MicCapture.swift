@@ -70,6 +70,12 @@ final class MicCapture {
     /// built-in speaker (the only route with an acoustic echo path).
     private var voiceProcessingActive: Bool = false
 
+    /// Output sources (e.g. WebRTC's playback path) waiting to be attached
+    /// to `engine.mainMixerNode`. Survives engine rebuilds — every time
+    /// the engine is recreated, we re-attach each entry. Kept as a dict
+    /// keyed by ObjectIdentifier so callers can detach by node reference.
+    private var registeredOutputSources: [ObjectIdentifier: (node: AVAudioSourceNode, format: AVAudioFormat)] = [:]
+
     private init() {
         permission = currentPermission()
         installInterruptionObserver()
@@ -215,6 +221,21 @@ final class MicCapture {
                 return
             }
             format = queried
+            // Wire mainMixer → output even when VPIO is off so any
+            // registered output source (e.g. WebRTC TTS playback) has a
+            // path to the speaker. AVAudioEngine doesn't auto-wire this
+            // unless mainMixerNode is touched, and even then the timing
+            // is fragile.
+            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: format)
+        }
+
+        // Re-attach any output sources registered before this engine was
+        // built (e.g. CueAudioDevice's WebRTC playback node). Each engine
+        // rebuild — initial start, route change, interruption recovery —
+        // discards prior node attachments, so we re-wire them here.
+        for entry in registeredOutputSources.values {
+            engine.attach(entry.node)
+            engine.connect(entry.node, to: engine.mainMixerNode, format: entry.format)
         }
 
         currentFormat = format
@@ -248,6 +269,32 @@ final class MicCapture {
         }
         currentFormat = nil
         voiceProcessingActive = false
+    }
+
+    // MARK: - Output sources (WebRTC TTS playback)
+
+    /// Register an output source node to be mixed into `mainMixerNode` and
+    /// driven through the engine's output (incl. VPIO when active).
+    /// Idempotent: re-registering the same node is a no-op.
+    ///
+    /// If the engine is currently running, the node is attached + connected
+    /// immediately. If not, it's stored and attached on the next engine
+    /// rebuild (start/route-change/interruption recovery).
+    func registerOutputSource(_ node: AVAudioSourceNode, format: AVAudioFormat) {
+        registeredOutputSources[ObjectIdentifier(node)] = (node, format)
+        if isCapturing {
+            engine.attach(node)
+            engine.connect(node, to: engine.mainMixerNode, format: format)
+        }
+    }
+
+    /// Unregister and disconnect a previously-registered output source.
+    func unregisterOutputSource(_ node: AVAudioSourceNode) {
+        registeredOutputSources.removeValue(forKey: ObjectIdentifier(node))
+        if isCapturing {
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+        }
     }
 
     private func shouldUseVoiceProcessing() -> Bool {

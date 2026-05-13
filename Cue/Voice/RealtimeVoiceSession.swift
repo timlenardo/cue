@@ -81,13 +81,25 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         RTCInitializeSSL()
     }()
 
+    /// Custom WebRTC audio device — pulls mic samples from MicCapture's
+    /// AVAudioEngine and plays inbound audio back through the same engine.
+    /// POC for the unified pipeline; supersedes WebRTC's default ADM so
+    /// there's one input HAL owner across all audio surfaces.
+    private let audioDevice: CueAudioDevice
+
     init(api: CueAPI, state: AppState) {
         _ = Self.sslInit
         self.api = api
         self.state = state
         let enc = RTCDefaultVideoEncoderFactory()
         let dec = RTCDefaultVideoDecoderFactory()
-        self.factory = RTCPeerConnectionFactory(encoderFactory: enc, decoderFactory: dec)
+        let device = CueAudioDevice()
+        self.audioDevice = device
+        self.factory = RTCPeerConnectionFactory(
+            encoderFactory: enc,
+            decoderFactory: dec,
+            audioDevice: device
+        )
         super.init()
         startLevelMetering()
     }
@@ -174,7 +186,11 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
             }
 
             try setupPeerConnection()
-            configureAudioSessionForWebRTC()
+            // POC: skip `configureAudioSessionForWebRTC` — the custom
+            // RTCAudioDevice replaces WebRTC's default ADM entirely, so
+            // WebRTC isn't operating its own audio unit and has no reason
+            // to touch the session config. MicCapture owns category/mode/
+            // VPIO; WebRTC reads/writes PCM via our ADM only.
             registerInterruptionObserver()
             try await performSDPExchange(ephemeralToken: resp.value)
 
