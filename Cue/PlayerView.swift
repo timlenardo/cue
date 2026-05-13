@@ -812,41 +812,172 @@ private struct VoiceOrbCore: View {
     let level: Float
     let onTap: () -> Void
 
-    // Multiplies into halo opacity and core shadow so only the glow fades
-    // in when the orb first appears. The core disc itself is at full
-    // opacity from frame 0 — the structural swap from PlayButton looks
-    // instant because both are 88pt white discs.
-    @State private var glow: Double = 0
+    // "Galaxy" preset from the debug view, with the user-tuned overrides:
+    //   - period 1.2s (faster morph rhythm)
+    //   - orb rotation 20°/s (slower whole-orb spin)
+    // Everything else (gain, cap, halo glow, highlight rotation, attack /
+    // release) is the Galaxy default. See LiquidOrbDebug.swift if you want
+    // to re-tune.
+    private static let gain: Double = 4.0
+    private static let cap: Double = 0.30
+    private static let attackSec: Double = 0.30
+    private static let releaseSec: Double = 0.60
+    private static let morphPeriodSec: Double = 1.2
+    private static let orbRotationDegPerSec: Double = 20
+    private static let highlightRotationDegPerSec: Double = 150
+    private static let haloMorphSpeedFactor: Double = -0.78
+    private static let haloSize: CGFloat = 150
+    private static let haloBlur: CGFloat = 24
+    private static let haloOpacityBase: Double = 0.35
+    private static let haloOpacityPerLevel: Double = 0.55
+    private static let haloScalePerLevel: Double = 0.12
+    private static let coreSize: CGFloat = 88
+    private static let coreScalePerLevel: Double = 0.18
+
+    @State private var envelope = VoiceOrbEnvelope()
 
     var body: some View {
         Button(action: onTap) {
-            ZStack {
-                // Outer halo — white glow that breathes with the mic level.
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 120, height: 120)
-                    .blur(radius: 26)
-                    .opacity((0.40 + Double(level) * 0.45) * glow)
-                    .scaleEffect(1.0 + CGFloat(level) * 0.40)
-
-                // Core — same 88pt footprint as the play button at rest, so
-                // the swap doesn't visually shrink the surface. Bounce
-                // scales UP from 1.0 → 1.2 instead of in from a smaller base.
-                Circle()
-                    .fill(Ambient.textPrimary)
-                    .frame(width: 88, height: 88)
-                    .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
-                    .scaleEffect(1.0 + CGFloat(level) * 0.20)
-                    .shadow(color: .white.opacity(0.45 * glow), radius: 28)
+            TimelineView(.animation) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                let target = min(Double(level) * Self.gain, Self.cap)
+                let amp = envelope.tick(
+                    now: t,
+                    target: target,
+                    attackSec: Self.attackSec,
+                    releaseSec: Self.releaseSec
+                )
+                liquidOrb(time: t, amp: amp)
             }
-            .animation(.spring(response: 0.18, dampingFraction: 0.55), value: level)
             .frame(width: 96, height: 96)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .onAppear {
-            withAnimation(.easeOut(duration: 0.5)) { glow = 1 }
+    }
+
+    @ViewBuilder
+    private func liquidOrb(time t: TimeInterval, amp: Double) -> some View {
+        let core = blobCorners(t: t, amp: amp)
+        // Halo runs the morph in reverse and slightly slower — gives the
+        // outer glow its own rhythm so it never tracks the core exactly.
+        let halo = blobCorners(t: t * Self.haloMorphSpeedFactor, amp: amp)
+
+        ZStack {
+            // Sage-green liquid halo behind the core.
+            LiquidMorphShape(corners: halo)
+                .fill(Ambient.accent)
+                .frame(width: Self.haloSize, height: Self.haloSize)
+                .blur(radius: Self.haloBlur)
+                .opacity(Self.haloOpacityBase + Double(level) * Self.haloOpacityPerLevel)
+                .scaleEffect(1.0 + CGFloat(level) * CGFloat(Self.haloScalePerLevel))
+
+            // Core blob with rotating inner highlight.
+            LiquidMorphShape(corners: core)
+                .fill(Ambient.textPrimary)
+                .frame(width: Self.coreSize, height: Self.coreSize)
+                .overlay(
+                    LiquidMorphShape(corners: core)
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color.white.opacity(0.95),
+                                    Color.white.opacity(0)
+                                ],
+                                center: UnitPoint(x: 0.3, y: 0.3),
+                                startRadius: 2,
+                                endRadius: 70
+                            )
+                        )
+                        .frame(width: Self.coreSize, height: Self.coreSize)
+                        .rotationEffect(.degrees(t * Self.highlightRotationDegPerSec))
+                )
+                .scaleEffect(1.0 + CGFloat(level) * CGFloat(Self.coreScalePerLevel))
+                .shadow(color: .white.opacity(0.30), radius: 22)
+                .animation(.spring(response: 0.18, dampingFraction: 0.55), value: level)
         }
+        // Slow rotation on the whole orb. Invisible at rest (a circle looks
+        // the same at every angle), but adds a tangible sense of spin once
+        // the morph kicks in.
+        .rotationEffect(.degrees(t * Self.orbRotationDegPerSec))
+    }
+
+    private func blobCorners(t: TimeInterval, amp: Double) -> LiquidMorphShape.Corners {
+        // Four independent oscillators — one per box edge — drive paired
+        // corner radii so each edge's two radii always sum to 1.0
+        // (prevents the path from crossing itself).
+        let omega = (2.0 * .pi) / Self.morphPeriodSec
+        let dTop    = amp * sin(omega * t + 0.0)
+        let dBottom = amp * sin(omega * t + 1.7)
+        let eLeft   = amp * sin(omega * t + 3.2)
+        let eRight  = amp * sin(omega * t + 4.9)
+        return LiquidMorphShape.Corners(
+            tl: CGPoint(x: 0.5 + dTop,    y: 0.5 + eLeft),
+            tr: CGPoint(x: 0.5 - dTop,    y: 0.5 + eRight),
+            br: CGPoint(x: 0.5 - dBottom, y: 0.5 - eRight),
+            bl: CGPoint(x: 0.5 + dBottom, y: 0.5 - eLeft)
+        )
+    }
+}
+
+// MARK: - Liquid morph shape
+
+/// Square with four independently-radiused elliptical corners. Each corner
+/// stores (rx, ry) as a fraction of the box width/height — the same model
+/// as CSS `border-radius: A% B% C% D% / E% F% G% H%`. Oscillating those
+/// values around 0.5 turns a circle into a fluid, wandering blob.
+struct LiquidMorphShape: Shape {
+    struct Corners: Equatable {
+        var tl: CGPoint
+        var tr: CGPoint
+        var br: CGPoint
+        var bl: CGPoint
+    }
+    var corners: Corners
+
+    func path(in rect: CGRect) -> Path {
+        let w = rect.width
+        let h = rect.height
+        let tl = CGPoint(x: corners.tl.x * w, y: corners.tl.y * h)
+        let tr = CGPoint(x: corners.tr.x * w, y: corners.tr.y * h)
+        let br = CGPoint(x: corners.br.x * w, y: corners.br.y * h)
+        let bl = CGPoint(x: corners.bl.x * w, y: corners.bl.y * h)
+
+        // Cubic Bezier approximation of a quarter ellipse.
+        let k: CGFloat = 0.5522847498
+
+        var p = Path()
+        // Start at the top edge, just past the top-left corner.
+        p.move(to: CGPoint(x: tl.x, y: 0))
+        p.addLine(to: CGPoint(x: w - tr.x, y: 0))
+        // Top-right corner.
+        p.addCurve(
+            to: CGPoint(x: w, y: tr.y),
+            control1: CGPoint(x: w - tr.x + tr.x * k, y: 0),
+            control2: CGPoint(x: w, y: tr.y - tr.y * k)
+        )
+        p.addLine(to: CGPoint(x: w, y: h - br.y))
+        // Bottom-right corner.
+        p.addCurve(
+            to: CGPoint(x: w - br.x, y: h),
+            control1: CGPoint(x: w, y: h - br.y + br.y * k),
+            control2: CGPoint(x: w - br.x + br.x * k, y: h)
+        )
+        p.addLine(to: CGPoint(x: bl.x, y: h))
+        // Bottom-left corner.
+        p.addCurve(
+            to: CGPoint(x: 0, y: h - bl.y),
+            control1: CGPoint(x: bl.x - bl.x * k, y: h),
+            control2: CGPoint(x: 0, y: h - bl.y + bl.y * k)
+        )
+        p.addLine(to: CGPoint(x: 0, y: tl.y))
+        // Top-left corner.
+        p.addCurve(
+            to: CGPoint(x: tl.x, y: 0),
+            control1: CGPoint(x: 0, y: tl.y - tl.y * k),
+            control2: CGPoint(x: tl.x - tl.x * k, y: 0)
+        )
+        p.closeSubpath()
+        return p
     }
 }
 
@@ -923,5 +1054,28 @@ private struct VoiceWaveformBarCore: View {
         .opacity(active ? 1 : 0)
         .animation(.easeInOut(duration: 0.25), value: active)
         .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Voice-orb envelope
+//
+// Smooths the audio-driven morph amplitude with separate attack and release
+// time constants, ticked each frame from the TimelineView. Reference type so
+// we can mutate it during render without telling SwiftUI — TimelineView is
+// already scheduling redraws.
+
+final class VoiceOrbEnvelope {
+    var amp: Double = 0
+    private var lastTickAt: TimeInterval = 0
+
+    func tick(now: TimeInterval, target: Double, attackSec: Double, releaseSec: Double) -> Double {
+        defer { lastTickAt = now }
+        guard lastTickAt > 0 else { return amp }
+        let dt = max(0, now - lastTickAt)
+        let tau = target > amp ? attackSec : releaseSec
+        guard tau > 0.001 else { amp = target; return amp }
+        let alpha = 1.0 - exp(-dt / tau)
+        amp = amp + (target - amp) * alpha
+        return amp
     }
 }
