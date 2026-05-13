@@ -108,6 +108,9 @@ struct PlayerView: View {
 
 private struct PlayerHeader: View {
     @Environment(AppState.self) private var state
+    #if DEBUG
+    @State private var showWaveformDebug = false
+    #endif
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -133,6 +136,12 @@ private struct PlayerHeader: View {
             .padding(.top, 2)
 
             CircleHeaderButton(system: "bookmark") {}
+                #if DEBUG
+                .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                    showWaveformDebug = true
+                })
+                .sheet(isPresented: $showWaveformDebug) { WaveformDebugView() }
+                #endif
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)
@@ -1027,28 +1036,53 @@ private struct VoiceWaveformBarCore: View {
     var body: some View {
         TimelineView(.animation) { context in
             let t = context.date.timeIntervalSinceReferenceDate
+            // Stronger HTML reference incremented `phase` by 0.15 per frame
+            // at 60fps; in seconds that's 9.0.
+            let phase = t * 9.0
+            // "Spiky" tuning (locked in via the debug tuner): gate the noise
+            // floor, slight compression on top, then scale aggressively.
+            let threshold = 0.024
+            let gated = max(0, Double(level) - threshold) / (1 - threshold)
+            let boosted = min(1.0, gated * 3.0)
+            let amp = pow(boosted, 0.85)
             Canvas { ctx, size in
-                let mid = size.height / 2
-                let baseAmp = CGFloat(level) * size.height * 0.45
-                // Carrier frequency in cycles across the bar width. Higher =
-                // finer waveform; lower = chunkier "speaker membrane" feel.
-                let cycles = 6.0
+                let mid = Double(size.height) / 2
+                let baseAmp = amp * Double(size.height) * 1.193
+                let widthD = Double(size.width)
                 var path = Path()
+                let step: Double = 1.0
+                var x: Double = 0
                 path.move(to: CGPoint(x: 0, y: mid))
-                let step: CGFloat = 1.5
-                var x: CGFloat = 0
-                while x <= size.width {
-                    let n = x / max(size.width, 1)
-                    // Envelope tethers the wave at both ends — amplitude is
-                    // 0 at x=0 and x=width, peaks at the midpoint. Reads as
-                    // a vibrating string anchored to the scrubber endpoints.
-                    let envelope = sin(n * .pi)
-                    let y = mid + sin(n * cycles * 2 * .pi + t * 6.0) * baseAmp * envelope
+                while x <= widthD {
+                    let n = x / max(widthD, 1)
+                    // Plain sin damping — broader active region than pow(sin, 1.5).
+                    let edgeDamping = sin(n * .pi)
+                    // Pixel-based frequencies, no division on the composite
+                    // (peaks can reach ~1.55× baseAmp on rare alignments —
+                    // gives the spiky audio-signal feel).
+                    let y1 = sin(x * 0.03 + phase)
+                    let y2 = sin(x * 0.07 - phase * 1.5) * 0.4
+                    let y3 = sin(x * 0.12 + phase * 2.0) * 0.15
+                    let composite = y1 + y2 + y3
+                    let y = mid + composite * baseAmp * edgeDamping
                     path.addLine(to: CGPoint(x: x, y: y))
                     x += step
                 }
-                ctx.addFilter(.shadow(color: glow.opacity(0.45), radius: 6))
-                ctx.stroke(path, with: .color(color), lineWidth: 2)
+                // Soft outer glow pass.
+                ctx.drawLayer { layer in
+                    layer.addFilter(.shadow(color: glow.opacity(0.8), radius: 10))
+                    layer.stroke(
+                        path,
+                        with: .color(color),
+                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                    )
+                }
+                // Sharp inner pass on top for definition.
+                ctx.stroke(
+                    path,
+                    with: .color(color),
+                    style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+                )
             }
         }
         .opacity(active ? 1 : 0)
