@@ -155,7 +155,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     }
 
     func startRecording() -> Bool {
-        log.info("startRecording")
+        log.info("startRecording (thread=\(Thread.current.description, privacy: .public))")
         let token = MicCapture.shared.addBufferHandler { [weak self] buffer, _ in
             self?.handleMicBuffer(buffer)
         }
@@ -167,7 +167,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     }
 
     func stopRecording() -> Bool {
-        log.info("stopRecording")
+        log.warning("stopRecording (thread=\(Thread.current.description, privacy: .public)) — WebRTC asked us to stop feeding mic samples")
         admQueue.sync {
             if let token = self.micHandlerToken {
                 MicCapture.shared.removeBufferHandler(token)
@@ -190,7 +190,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     }
 
     func startPlayout() -> Bool {
-        log.info("startPlayout")
+        log.info("startPlayout (thread=\(Thread.current.description, privacy: .public))")
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: kSampleRate,
@@ -215,7 +215,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     }
 
     func stopPlayout() -> Bool {
-        log.info("stopPlayout")
+        log.warning("stopPlayout (thread=\(Thread.current.description, privacy: .public)) — WebRTC stopped pulling AI audio")
         if let source = outputSourceNode {
             Task { @MainActor in
                 MicCapture.shared.unregisterOutputSource(source)

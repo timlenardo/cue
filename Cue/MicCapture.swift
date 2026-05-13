@@ -163,6 +163,7 @@ final class MicCapture {
     /// known volume-headroom side effect — that's the tradeoff for
     /// having the mic not hear the podcast.
     private func bringUpEngine() {
+        print("[MicCapture] bringUpEngine — registeredOutputSources count = \(registeredOutputSources.count)")
         // Detach any previously-registered output sources from the current
         // engine BEFORE we replace it. AVAudioEngine treats a node attached
         // to two engine instances as undefined behavior — typically a crash
@@ -272,6 +273,7 @@ final class MicCapture {
     }
 
     private func tearDownEngine() {
+        print("[MicCapture] tearDownEngine — isCapturing=\(isCapturing), registeredOutputSources count=\(registeredOutputSources.count)")
         if isCapturing {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
