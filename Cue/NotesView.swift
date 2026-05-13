@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct NotesView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         let palette = state.palette
@@ -46,7 +46,7 @@ struct NotesView: View {
 }
 
 private struct NotesGroupView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let group: NoteGroup
 
     var body: some View {
@@ -96,7 +96,7 @@ private struct NotesGroupView: View {
 }
 
 private struct NoteRow: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let item: NoteItem
 
     var body: some View {

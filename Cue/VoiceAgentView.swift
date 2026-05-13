@@ -17,13 +17,12 @@ private func uiPhase(from session: RealtimeVoiceSession.Phase) -> VoicePhase {
     }
 }
 
-/// Public entry. Reads the optional session off AppState; SwiftUI can't
-/// observe an optional ObservableObject directly, so when a session is
-/// active we hand it to `VoiceAgentLiveBody` which observes it via
-/// `@ObservedObject`. When there is no session (canned-sample mode or
+/// Public entry. Reads the optional session off AppState; when a session is
+/// active we hand it to `VoiceAgentLiveBody` which observes its @Observable
+/// state automatically. When there is no session (canned-sample mode or
 /// no live episode), we render a "load an episode" placeholder.
 struct VoiceAgentView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         if let session = state.voiceSession {
@@ -37,8 +36,8 @@ struct VoiceAgentView: View {
 // MARK: - Live body (session present)
 
 private struct VoiceAgentLiveBody: View {
-    @EnvironmentObject var state: AppState
-    @ObservedObject var session: RealtimeVoiceSession
+    @Environment(AppState.self) private var state
+    let session: RealtimeVoiceSession
 
     private var phase: VoicePhase { uiPhase(from: session.phase) }
 
@@ -125,7 +124,7 @@ private struct VoiceAgentLiveBody: View {
 // MARK: - Empty body (no live episode loaded)
 
 private struct VoiceAgentEmptyBody: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         let palette = state.palette
@@ -160,7 +159,7 @@ private struct VoiceAgentEmptyBody: View {
 private struct VoiceSheetScaffold<Content: View>: View {
     let palette: Palette
     @ViewBuilder let content: () -> Content
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         ZStack(alignment: .bottom) {

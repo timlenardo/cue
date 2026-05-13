@@ -1,8 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
-    @EnvironmentObject var state: AppState
-    @EnvironmentObject var api: CueAPI
+    @Environment(AppState.self) private var state
+    @Environment(CueAPI.self) private var api
 
     var body: some View {
         let palette = state.palette
@@ -47,7 +47,7 @@ struct ContentView: View {
 // MARK: - Coming soon empty state
 
 struct ComingSoonView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let title: String
 
     var body: some View {
@@ -94,7 +94,7 @@ struct ComingSoonView: View {
 // MARK: - Tab bar (3 tabs, no center + button)
 
 struct TabBarView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         let palette = state.palette

@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Observation
 import Security
 import os
 
@@ -204,30 +205,31 @@ enum CueAPIError: LocalizedError {
 // MARK: - Client
 
 @MainActor
-final class CueAPI: ObservableObject {
+@Observable
+final class CueAPI {
     static let shared = CueAPI()
 
     /// Cue's own backend (github.com/timlenardo/cue-server).
     /// cue-dev is the auto-deployed staging app; cue-prod is promoted manually.
     static let baseURL = URL(string: "https://cue-dev-7bd3eabd5817.herokuapp.com")!
 
-    @Published private(set) var token: String?
-    @Published private(set) var account: CueAccount?
+    private(set) var token: String?
+    private(set) var account: CueAccount?
 
-    private let session: URLSession = {
+    @ObservationIgnored private let session: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 60
         cfg.timeoutIntervalForResource = 300
         return URLSession(configuration: cfg)
     }()
 
-    private let decoder: JSONDecoder = {
+    @ObservationIgnored private let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
         return d
     }()
 
-    private let encoder = JSONEncoder()
+    @ObservationIgnored private let encoder = JSONEncoder()
 
     init() {
         self.token = TokenStore.load()

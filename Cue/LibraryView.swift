@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct LibraryView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         let palette = state.palette
@@ -96,7 +96,7 @@ struct LibraryView: View {
 // MARK: - Now-playing hero
 
 private struct NowPlayingCard: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let item: LibraryItem
 
     var body: some View {
@@ -211,7 +211,7 @@ private struct NowPlayingCard: View {
 // MARK: - Section label
 
 private struct SectionLabel: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let label: String
     let count: Int?
 
@@ -241,7 +241,7 @@ private struct SectionLabel: View {
 // MARK: - Episode row
 
 private struct EpisodeRow: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let item: LibraryItem
 
     var body: some View {
@@ -371,7 +371,7 @@ private struct ShowMonogram: View {
 // MARK: - Helpers
 
 private struct ProgressBarMini: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let progress: Double
     let accent: Color
 
@@ -389,7 +389,7 @@ private struct ProgressBarMini: View {
 }
 
 private struct Separator: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     var body: some View {
         Rectangle()
             .fill(state.palette.cardEdge)

@@ -25,7 +25,7 @@ private enum Ambient {
 // MARK: - Player
 
 struct PlayerView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -97,7 +97,7 @@ struct PlayerView: View {
 // MARK: - Header
 
 private struct PlayerHeader: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -160,7 +160,7 @@ private struct CircleHeaderButton: View {
 // MARK: - Transcript
 
 private struct TranscriptScrollView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     @State private var followsActive: Bool = true
     @State private var scrollTopId: Int?
@@ -274,7 +274,7 @@ private struct TranscriptScrollView: View {
 }
 
 private struct SentenceBlock: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
     let sentence: TranscriptSentence
     let isActive: Bool
     let isPast: Bool
@@ -362,7 +362,7 @@ private struct SentenceBlock: View {
 // MARK: - Progress
 
 private struct ProgressBar: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         let duration = state.totalDuration
@@ -462,7 +462,7 @@ private struct ProgressBar: View {
 // MARK: - Primary controls
 
 private struct PrimaryControls: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         // Dim/disable the surrounding controls with the shade (`voiceOpen`).
@@ -535,7 +535,7 @@ private struct PrimaryControls: View {
 }
 
 private struct PlayButton: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         Button { state.togglePlay() } label: {
@@ -583,7 +583,7 @@ private struct SkipButton: View {
 // MARK: - Secondary row (queue + listening pill + menu)
 
 private struct SecondaryRow: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         HStack {
@@ -729,7 +729,7 @@ private struct VoiceOrb: View {
 }
 
 private struct VoiceOrbLive: View {
-    @ObservedObject var session: RealtimeVoiceSession
+    let session: RealtimeVoiceSession
     let onTap: () -> Void
 
     var body: some View {
@@ -801,7 +801,7 @@ private struct VoiceWaveformBar: View {
 }
 
 private struct VoiceWaveformBarLive: View {
-    @ObservedObject var session: RealtimeVoiceSession
+    let session: RealtimeVoiceSession
     let color: Color
     let glow: Color
 

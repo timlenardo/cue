@@ -5,7 +5,7 @@ import SwiftUI
 /// mini player: tap the card to expand, tap the trailing button to toggle
 /// play/pause.
 struct MiniPlayerBar: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) private var state
 
     var body: some View {
         guard let live = state.live else { return AnyView(EmptyView()) }

@@ -1,8 +1,8 @@
 import SwiftUI
 
 struct EntryView: View {
-    @EnvironmentObject var state: AppState
-    @EnvironmentObject var api: CueAPI
+    @Environment(AppState.self) private var state
+    @Environment(CueAPI.self) private var api
 
     @State private var url: String = ""
     @FocusState private var urlFieldFocused: Bool
