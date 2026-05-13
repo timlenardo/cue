@@ -20,12 +20,20 @@ struct EntryView: View {
 
         VStack(alignment: .leading, spacing: 0) {
             // Brand row
-            HStack {
+            HStack(spacing: 10) {
                 Text("Cue")
                     .font(Fonts.serif(28, weight: .medium))
                     .tracking(-0.5)
                     .foregroundStyle(palette.ink)
                 Spacer()
+                Button { state.settingsOpen = true } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundStyle(palette.ink)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(palette.subtle))
+                }
+                .buttonStyle(.plain)
                 Button { api.signOut() } label: {
                     Image(systemName: "person.crop.circle")
                         .font(.system(size: 18, weight: .regular))

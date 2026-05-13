@@ -70,6 +70,11 @@ final class MicCapture {
     /// built-in speaker (the only route with an acoustic echo path).
     private var voiceProcessingActive: Bool = false
 
+    /// Public read-only view of `voiceProcessingActive` for the dev
+    /// "AV Audio Session internals" HUD. Reading a Bool cross-thread is
+    /// safe (no tearing on 1-bit values); writers all run on main.
+    var isVoiceProcessingActive: Bool { voiceProcessingActive }
+
     /// Output sources (e.g. WebRTC's playback path) waiting to be attached
     /// to `engine.mainMixerNode`. Survives engine rebuilds — every time
     /// the engine is recreated, we re-attach each entry. Kept as a dict
