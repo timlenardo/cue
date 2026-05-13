@@ -443,6 +443,10 @@ final class AppState {
             withAnimation(.easeOut(duration: 0.25)) {
                 self.voiceOpen = false
                 self.playbackDetailsVisible = true
+                // Defensive: if an in-flight open-task fired during our
+                // 270ms gap and re-flipped morphActive, clear it here so
+                // the player can't end up closed-with-waveform-stuck.
+                self.voiceMorphActive = false
             }
         }
 
