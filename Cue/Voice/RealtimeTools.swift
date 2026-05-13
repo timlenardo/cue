@@ -37,6 +37,10 @@ enum RealtimeTools {
             state.audio.setRate(Float(state.speed))
             return .terminal(outputJSON: #"{"ok":true}"#)
 
+        case "pause_playback":
+            state.audio.pause()
+            return .nonTerminal(outputJSON: #"{"ok":true}"#)
+
         case "seek_to_timestamp":
             let seconds = (args["seconds"] as? Double) ?? Double((args["seconds"] as? Int) ?? 0)
             let target = max(0, seconds)
