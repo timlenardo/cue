@@ -82,18 +82,35 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
     /// unregistered + nilled in `stopPlayout`.
     private var outputSourceNode: AVAudioSourceNode?
 
+    /// AVAudioSourceNode asks for arbitrary `frameCount` per render tick
+    /// (often 1024 on built-in speaker, varies on Bluetooth/AirPlay).
+    /// WebRTC's `getPlayoutData` is contracted to return 10 ms chunks
+    /// (480 frames at 48 kHz). We bridge the two with a small Int16
+    /// backlog: each render tick pulls 480-frame chunks from WebRTC into
+    /// the backlog until there's enough to satisfy the engine's request,
+    /// then drains the requested count. Touched only from the render
+    /// thread, so no synchronization needed.
+    private var playoutBacklog: [Int16] = []
+    /// Monotonic frame counter passed to WebRTC's `getPlayoutData` so its
+    /// NetEQ can compute play-out timing. Touched only on render thread.
+    private var outputSampleClock: Int64 = 0
+
     // MARK: - Input pipeline state
 
     private var micHandlerToken: UUID?
     private var inputConverter: AVAudioConverter?
     private var inputTargetFormat: AVAudioFormat?
     private var inputRing: [Int16] = []
+    /// Monotonic sample-frame counter passed to WebRTC's `deliverRecordedData`
+    /// as `AudioTimeStamp.mSampleTime`. Increments by exactly
+    /// `kFramesPerChunk` per delivered chunk. WebRTC's APM (AEC delay
+    /// estimator, NetEQ jitter buffer) is driven off this — passing 0
+    /// every call makes them think every chunk is concurrent and breaks
+    /// delay alignment. Touched only on `admQueue`.
+    private var inputSampleClock: Int64 = 0
     /// Pooled output buffer for AVAudioConverter — sized once on first
     /// use and reused for every mic buffer to keep the audio render thread
     /// allocation-free. The converter overwrites `frameLength` on each call.
-    /// Capacity covers MicCapture's 4096-frame tap at any reasonable
-    /// resampling ratio (worst case ~8192 at a 2x upsample, which we never
-    /// hit since both sides are 48 kHz).
     private var inputConvertBuffer: AVAudioPCMBuffer?
 
     // MARK: - Init
@@ -195,6 +212,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
         }
         admQueue.async { [weak self] in
             self?.micHandlerToken = token
+            self?.inputSampleClock = 0
         }
         _isRecording = true
         return true
@@ -211,6 +229,7 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
             self.inputConverter = nil
             self.inputTargetFormat = nil
             self.inputConvertBuffer = nil
+            self.inputSampleClock = 0
         }
         _isRecording = false
         return true
@@ -235,6 +254,11 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
             log.error("startPlayout: failed to build playback format")
             return false
         }
+        // Reset playout state before the source node is registered. After
+        // attach, the render callback may fire before we'd otherwise get a
+        // chance to clear stale backlog from a prior session.
+        playoutBacklog.removeAll(keepingCapacity: true)
+        outputSampleClock = 0
         let source = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
             return self?.renderPlayout(frameCount: frameCount, audioBufferList: audioBufferList) ?? noErr
         }
@@ -359,10 +383,12 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
         }
     }
 
+    /// Called on `admQueue` only — `inputSampleClock` mutation is safe.
     private func deliverChunk(_ samples: [Int16]) {
         guard let deliver = deliverRecordedData else { return }
 
         var mutableSamples = samples
+        let clock = inputSampleClock
         mutableSamples.withUnsafeMutableBufferPointer { ptr in
             var audioBuffer = AudioBuffer(
                 mNumberChannels: UInt32(kChannels),
@@ -373,16 +399,21 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
             var actionFlags: AudioUnitRenderActionFlags = []
             var timestamp = AudioTimeStamp()
             timestamp.mFlags = .sampleTimeValid
-            timestamp.mSampleTime = 0
+            timestamp.mSampleTime = Float64(clock)
             _ = deliver(&actionFlags, &timestamp, 0, UInt32(ptr.count), &bufferList, nil, nil)
         }
+        inputSampleClock += Int64(samples.count)
     }
 
     // MARK: - Output: WebRTC → AVAudioEngine source node
 
-    /// Render callback on the audio render thread. Pull Int16 samples from
-    /// WebRTC via `getPlayoutData`, convert to Float32, write into the
-    /// engine's output buffer.
+    /// Render callback on the audio render thread.
+    ///
+    /// The engine asks for `frameCount` samples per call (often 1024 on
+    /// the built-in speaker, varies elsewhere). WebRTC's `getPlayoutData`
+    /// only returns 10 ms (`kFramesPerChunk` = 480) at a time. We pull
+    /// 480-frame chunks into `playoutBacklog` until we have enough to
+    /// satisfy the engine, then drain `frameCount` into the output buffer.
     nonisolated private func renderPlayout(
         frameCount: AVAudioFrameCount,
         audioBufferList: UnsafePointer<AudioBufferList>
@@ -392,36 +423,59 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
             return noErr
         }
 
-        let int16Count = Int(frameCount) * kChannels
-        let int16Bytes = int16Count * MemoryLayout<Int16>.size
+        let needed = Int(frameCount) * kChannels
+        let chunkSamples = kFramesPerChunk * kChannels
+        let chunkBytes = chunkSamples * MemoryLayout<Int16>.size
 
-        // Reuse a persistent scratch buffer. Allocating + deallocating
-        // every render tick on the audio thread is both wasteful and
-        // non-realtime-safe — the allocator can block under pressure.
-        let scratch = ensureRenderScratch(bytes: int16Bytes)
-        memset(scratch, 0, int16Bytes)
+        // Pull from WebRTC in 480-frame chunks until backlog can satisfy
+        // the engine's request. Cap iterations to defend against pathological
+        // cases (e.g. WebRTC starvation with frameCount many multiples of 480).
+        let maxIterations = (needed / chunkSamples) + 2
+        var iterations = 0
+        while playoutBacklog.count < needed && iterations < maxIterations {
+            iterations += 1
+            let scratch = ensureRenderScratch(bytes: chunkBytes)
+            memset(scratch, 0, chunkBytes)
 
-        var audioBuffer = AudioBuffer(
-            mNumberChannels: UInt32(kChannels),
-            mDataByteSize: UInt32(int16Bytes),
-            mData: scratch
-        )
-        var inputList = AudioBufferList(mNumberBuffers: 1, mBuffers: audioBuffer)
-        var actionFlags: AudioUnitRenderActionFlags = []
-        var timestamp = AudioTimeStamp()
-        timestamp.mFlags = .sampleTimeValid
+            var audioBuffer = AudioBuffer(
+                mNumberChannels: UInt32(kChannels),
+                mDataByteSize: UInt32(chunkBytes),
+                mData: scratch
+            )
+            var inputList = AudioBufferList(mNumberBuffers: 1, mBuffers: audioBuffer)
+            var actionFlags: AudioUnitRenderActionFlags = []
+            var timestamp = AudioTimeStamp()
+            timestamp.mFlags = .sampleTimeValid
+            timestamp.mSampleTime = Float64(outputSampleClock)
 
-        _ = getPlayout(&actionFlags, &timestamp, 0, frameCount, &inputList)
+            _ = getPlayout(&actionFlags, &timestamp, 0, AVAudioFrameCount(kFramesPerChunk), &inputList)
+            outputSampleClock += Int64(kFramesPerChunk)
 
+            // Append chunk to backlog (zero-padded if WebRTC short-read).
+            let int16Ptr = scratch.assumingMemoryBound(to: Int16.self)
+            playoutBacklog.reserveCapacity(playoutBacklog.count + chunkSamples)
+            for i in 0..<chunkSamples {
+                playoutBacklog.append(int16Ptr[i])
+            }
+        }
+
+        // Drain `needed` samples into the engine's output buffer.
         let ablPtr = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: audioBufferList))
         guard let outBuffer = ablPtr.first,
               let outData = outBuffer.mData?.assumingMemoryBound(to: Float32.self) else {
             return noErr
         }
-        let int16Ptr = scratch.assumingMemoryBound(to: Int16.self)
         let scale: Float32 = 1.0 / 32768.0
-        for i in 0..<Int(frameCount) {
-            outData[i] = Float32(int16Ptr[i]) * scale
+        let available = min(playoutBacklog.count, needed)
+        for i in 0..<available {
+            outData[i] = Float32(playoutBacklog[i]) * scale
+        }
+        // Zero-pad if backlog couldn't satisfy the request (WebRTC starved).
+        for i in available..<needed {
+            outData[i] = 0
+        }
+        if available > 0 {
+            playoutBacklog.removeFirst(available)
         }
         return noErr
     }

@@ -44,7 +44,7 @@ final class WakeWordEngine: @unchecked Sendable {
 
     /// Triggers we accept. Word-boundary, case-insensitive. Add more
     /// aliases here as you hear false-negatives in the logs.
-    private static let TriggerPattern = #"\b(qq|q\s*q|cue\s*cue|queue\s*queue|kew\s*kew|coo\s*coo|hey\s+cue|hey\s+q(ueue|ew|u)?)\b"#
+    private static let TriggerPattern = #"\b(alexa|qq|q\s*q|cue\s*cue|queue\s*queue|kew\s*kew|coo\s*coo|hey\s+cue|hey\s+q(ueue|ew|u)?)\b"#
 
     // MARK: - State
     private let triggerRegex: NSRegularExpression = {
@@ -207,7 +207,11 @@ final class WakeWordEngine: @unchecked Sendable {
         if text.isEmpty {
             log.info("whisper: (empty)")
         } else {
-            log.info("whisper: '\(text, privacy: .public)'")
+            // Disabled: with the always-on background mic, logging the
+            // decoded transcript as public OSLog is a privacy leak —
+            // anything spoken near the phone shows up in Console /
+            // sysdiagnose. Re-enable with `.private` if needed for debug.
+            // log.info("whisper: '\(text, privacy: .public)'")
         }
 
         let range = NSRange(text.startIndex..., in: text)
