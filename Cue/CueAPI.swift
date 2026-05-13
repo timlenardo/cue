@@ -13,12 +13,21 @@ private func logBody(_ label: String, _ data: Data?, max: Int = 4000) {
         log.debug("\(label, privacy: .public): <empty>")
         return
     }
+    // OSLog string interpolation is evaluated eagerly — `String(data:encoding:)`
+    // and the substring slice run regardless of whether `.debug` messages are
+    // being captured. For a 500 KB transcribe response that's ~400 µs per call
+    // burned for log lines no end-user will ever see. Keep the full-body dump
+    // for development and emit size only in release.
+    #if DEBUG
     let s = String(data: data, encoding: .utf8) ?? "<\(data.count) bytes, non-utf8>"
     if s.count > max {
         log.debug("\(label, privacy: .public) [\(data.count) bytes, truncated]: \(s.prefix(max), privacy: .public)…")
     } else {
         log.debug("\(label, privacy: .public) [\(data.count) bytes]: \(s, privacy: .public)")
     }
+    #else
+    log.debug("\(label, privacy: .public) [\(data.count, privacy: .public) bytes]")
+    #endif
 }
 
 // MARK: - DTOs
@@ -408,7 +417,9 @@ final class CueAPI {
                     var eventCount = 0
                     for try await line in bytes.lines {
                         guard !line.isEmpty else { continue }
+                        #if DEBUG
                         log.debug("← ndjson line: \(line.prefix(500), privacy: .public)")
+                        #endif
                         if let event = parseEvent(line) {
                             eventCount += 1
                             switch event {
