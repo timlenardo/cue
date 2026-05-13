@@ -172,15 +172,14 @@ final class AppState {
     /// Settings sheet visibility, driven by the gear button in EntryView.
     var settingsOpen: Bool = false
 
-    /// Dev toggle: when on, force-arm the wake engine (regardless of whether
-    /// an episode is loaded) and surface every Whisper transcript as a toast
-    /// over the app via `wakeTranscripts`. Persisted across launches.
+    /// Dev toggle: when on, surface every Whisper transcript as a toast over
+    /// the app via `wakeTranscripts`. Wake engine arming is NOT affected —
+    /// the engine still requires a loaded episode. Persisted across launches.
     var wakeTrackingEnabled: Bool = AppState.loadWakeTracking() {
         didSet {
             guard oldValue != wakeTrackingEnabled else { return }
             AppState.saveWakeTracking(wakeTrackingEnabled)
             if !wakeTrackingEnabled { wakeTranscripts.removeAll() }
-            updateWakeArmed()
         }
     }
 
@@ -322,7 +321,19 @@ final class AppState {
         }
         #endif
 
-        wake.onDetect = { [weak self] in self?.openVoiceAgent() }
+        wake.onDetect = { [weak self] in
+            guard let self else { return }
+            // Defensive: the gating in updateWakeArmed should already prevent
+            // wake from listening with no episode loaded, but if an in-flight
+            // inference completes after stop() (or any other edge case leaks
+            // a fire), refuse to open the agent — the user has nothing
+            // loaded to talk about.
+            guard self.live != nil else {
+                print("[wake] onDetect dropped — no live episode")
+                return
+            }
+            self.openVoiceAgent()
+        }
         wake.onTranscript = { [weak self] text, isHit, levels in
             self?.addWakeTranscript(text, isHit: isHit, levels: levels)
         }
@@ -377,11 +388,6 @@ final class AppState {
                 )
             }
             .store(in: &audioSubs)
-
-        // If the dev wake-tracking toggle is on from a prior launch, arm the
-        // engine immediately — without this, the toggle silently does
-        // nothing until the user loads a podcast or flips it off and on.
-        if wakeTrackingEnabled { updateWakeArmed() }
     }
 
     // MARK: - Wake-word arming
@@ -440,10 +446,11 @@ final class AppState {
     /// Idempotent. Called from any transition that changes `live` or
     /// `voiceOpen`.
     private func updateWakeArmed() {
-        // wakeTrackingEnabled force-arms the engine even when no episode is
-        // loaded, so dev can verify what Whisper is hearing without first
-        // having to start a podcast.
-        let shouldRunMic = live != nil || wakeTrackingEnabled
+        // Wake only listens when an episode is loaded. The dev tracking
+        // toggle controls toast surfacing only — it does not force-arm
+        // the engine, because firing wake without a loaded episode opens
+        // an empty voice agent that the user has no context for.
+        let shouldRunMic = live != nil
         let shouldArmWake = shouldRunMic && !voiceOpen
 
         if shouldRunMic != micArmedForWake {

@@ -14,7 +14,7 @@ struct SettingsView: View {
                     section(title: "Developer") {
                         toggleRow(
                             title: "Wake word tracking",
-                            subtitle: "Show every transcript the wake-word engine picks up as a toast. Triggers (\(WakeWordEngine.userVisibleTriggers)) get a green check.",
+                            subtitle: "Show every transcript the wake-word engine picks up as a toast. Triggers (\(WakeWordEngine.userVisibleTriggers)) get a green check. Requires a loaded episode — wake only runs during playback.",
                             isOn: $state.wakeTrackingEnabled
                         )
                         Divider().background(state.palette.cardEdge).padding(.leading, 14)
