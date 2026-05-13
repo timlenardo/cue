@@ -317,15 +317,28 @@ private let log = Logger(subsystem: "com.toug.cue", category: "AudioDevice")
         guard let converter = inputConverter else { return }
 
         // Pool the conversion buffer to avoid allocating on the render thread.
-        // 8192 covers MicCapture's 4096-frame tap at any practical sample-rate
-        // ratio (both sides are 48 kHz today, so it's 1:1).
-        if inputConvertBuffer == nil {
-            inputConvertBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 8192)
+        // Size for the worst-case upsample (e.g. 8 kHz Bluetooth HFP input → 48 kHz
+        // target = 6x), plus a safety margin. MicCapture's tap is 4096 frames.
+        let upsampleRatio = max(1.0, kSampleRate / max(buffer.format.sampleRate, 1.0))
+        let requiredCapacity = AVAudioFrameCount(Double(buffer.frameLength) * upsampleRatio) + 256
+        if inputConvertBuffer == nil || (inputConvertBuffer?.frameCapacity ?? 0) < requiredCapacity {
+            inputConvertBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: requiredCapacity)
         }
         guard let outBuffer = inputConvertBuffer else { return }
 
         var error: NSError?
+        // The converter input block may be called more than once if the
+        // converter wants more packets than we have. Return the buffer once,
+        // then signal `.noDataNow` — otherwise the same buffer gets consumed
+        // repeatedly and WebRTC receives duplicated mic audio. Same pattern
+        // as WakeWordEngine.resample.
+        var fed = false
         let status = converter.convert(to: outBuffer, error: &error) { _, outStatus in
+            if fed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            fed = true
             outStatus.pointee = .haveData
             return buffer
         }

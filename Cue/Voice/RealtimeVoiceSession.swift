@@ -478,16 +478,13 @@ final class RealtimeVoiceSession: NSObject, ObservableObject {
         peerConnection = nil
         pendingContextMessage = nil
 
-        // Restore AudioPlayer's preferred config so the podcast can
-        // resume cleanly through the speaker without WebRTC's voiceChat
-        // mode lingering.
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(
-            .playAndRecord,
-            mode: .spokenAudio,
-            options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP]
-        )
-        try? session.setActive(true)
+        // POC: do NOT reconfigure the AVAudioSession here. With the custom
+        // RTCAudioDevice (CueAudioDevice), MicCapture owns the session
+        // category/mode/VPIO for the entire playback lifetime. Resetting
+        // to `.spokenAudio` here would override MicCapture's `.voiceChat`
+        // and leave the still-running VPIO engine under a stale config
+        // until the next route change forces a bringUpEngine. WebRTC's
+        // own audio unit is not active so it has nothing to clean up.
     }
 }
 

@@ -286,6 +286,15 @@ final class MicCapture {
 
     private func tearDownEngine() {
         print("[MicCapture] tearDownEngine — isCapturing=\(isCapturing), registeredOutputSources count=\(registeredOutputSources.count)")
+        // Detach any registered output sources from this engine before it
+        // goes out of scope. Without this, the source node stays attached
+        // to a stopped-but-not-yet-deallocated engine; the next bringUpEngine
+        // then tries to attach it to a fresh engine and AVAudioEngine treats
+        // "node attached to two engines" as a crash on the next render tick.
+        for entry in registeredOutputSources.values {
+            engine.disconnectNodeOutput(entry.node)
+            engine.detach(entry.node)
+        }
         if isCapturing {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
