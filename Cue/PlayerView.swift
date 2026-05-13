@@ -789,7 +789,7 @@ private struct SecondaryRow: View {
     }
 }
 
-// MARK: - "Cue is listening" pill
+// MARK: - "Orbit is listening" pill
 
 private struct ListeningPill: View {
     /// True iff the pill should run its idle `.repeatForever` motion.
@@ -820,7 +820,7 @@ private struct ListeningPill: View {
             }
             .frame(width: 24, height: 16)
 
-            (Text("Tap or say ") + Text("qq").italic())
+            (Text("Tap or say ") + Text("orbit").italic())
                 .font(.system(size: 13, weight: .semibold))
                 .tracking(0.2)
                 .foregroundStyle(Ambient.textPrimary)
