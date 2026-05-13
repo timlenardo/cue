@@ -303,19 +303,6 @@ final class WakeWordEngine: @unchecked Sendable {
 
     @MainActor
     private func handleTranscript(_ text: String, levels: AudioLevelStats?) {
-        // Always log the decoded text so dev can see what the mic
-        // is picking up. Whisper emits "(silence)" / "[BLANK_AUDIO]" /
-        // empty when nothing speech-like was heard — leave those alone.
-        if text.isEmpty {
-            log.info("whisper: (empty)")
-        } else {
-            // Disabled: with the always-on background mic, logging the
-            // decoded transcript as public OSLog is a privacy leak —
-            // anything spoken near the phone shows up in Console /
-            // sysdiagnose. Re-enable with `.private` if needed for debug.
-            // log.info("whisper: '\(text, privacy: .public)'")
-        }
-
         let range = NSRange(text.startIndex..., in: text)
         let isHit = triggerRegex.firstMatch(in: text, options: [], range: range) != nil
 

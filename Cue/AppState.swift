@@ -187,6 +187,11 @@ final class AppState {
     /// after 2s; the UI renders the array in render order, stacked.
     var wakeTranscripts: [WakeTranscript] = []
 
+    /// Throttle for non-hit toasts. Whisper runs at ~4 Hz and emits nearly
+    /// identical text each pass; without this, the toast stack thrashes
+    /// SwiftUI animations 4×/sec whenever someone is speaking nearby.
+    @ObservationIgnored private var lastNonHitToastAt: Date = .distantPast
+
     private static let wakeTrackingKey = "cue.wakeTracking"
     private static func loadWakeTracking() -> Bool {
         UserDefaults.standard.bool(forKey: wakeTrackingKey)
@@ -322,15 +327,6 @@ final class AppState {
             self?.skipFwd15()
         }
 
-        #if DEBUG
-        // Diagnostic: log a single line every ~2s confirming the mic tap is
-        // delivering buffers. Remove once the real wake-word listener is in.
-        let diag = MicCaptureDiag()
-        MicCapture.shared.addBufferHandler { buffer, _ in
-            diag.tick(frames: Int(buffer.frameLength), sampleRate: buffer.format.sampleRate)
-        }
-        #endif
-
         wake.onDetect = { [weak self] in
             guard let self else { return }
             // Defensive: the gating in updateWakeArmed should already prevent
@@ -438,6 +434,14 @@ final class AppState {
         // ages out 2s later.
         if let last = wakeTranscripts.last, last.text == trimmed, last.isHit == isHit {
             return
+        }
+        // Whisper emits near-duplicates 4×/sec; rate-limit non-hit toasts
+        // so the overlay can't thrash SwiftUI continuously. Hit toasts
+        // bypass — they're already debounced 1.5s upstream in WakeWordEngine.
+        if !isHit {
+            let now = Date()
+            guard now.timeIntervalSince(lastNonHitToastAt) >= 0.6 else { return }
+            lastNonHitToastAt = now
         }
         let toast = WakeTranscript(text: trimmed, isHit: isHit, levels: levels)
         withAnimation(.easeOut(duration: 0.18)) {
@@ -942,26 +946,3 @@ final class AppState {
     }
 }
 
-#if DEBUG
-/// Tiny helper to count buffers from the audio thread without tripping
-/// Swift 6 sendability rules. Internally synchronized with a lock.
-private final class MicCaptureDiag: @unchecked Sendable {
-    private let lock = NSLock()
-    nonisolated(unsafe) private var bufferCount = 0
-    nonisolated(unsafe) private var lastLogAt = Date(timeIntervalSince1970: 0)
-
-    nonisolated func tick(frames: Int, sampleRate: Double) {
-        lock.lock()
-        bufferCount += 1
-        let now = Date()
-        if now.timeIntervalSince(lastLogAt) >= 2.0 {
-            lastLogAt = now
-            let count = bufferCount
-            lock.unlock()
-            print("[MicCapture diag] \(count) buffers · \(frames) frames @ \(Int(sampleRate)) Hz")
-        } else {
-            lock.unlock()
-        }
-    }
-}
-#endif
