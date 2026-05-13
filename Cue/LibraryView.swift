@@ -322,7 +322,21 @@ private struct ShowMonogram: View {
     let size: CGFloat
     let radius: CGFloat
 
-    private var monogram: String {
+    // Computed once at init; body reads cached values. Library rows can be
+    // rebuilt as the user scrolls / paginates, so even though the inner
+    // text rarely changes, recomputing the FNV-1a hash per body adds up.
+    private let monogram: String
+    private let color: Color
+
+    init(text: String, size: CGFloat, radius: CGFloat) {
+        self.text = text
+        self.size = size
+        self.radius = radius
+        self.monogram = Self.makeMonogram(from: text)
+        self.color = Self.makeColor(from: text)
+    }
+
+    private static func makeMonogram(from text: String) -> String {
         let words = text
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .filter { !$0.isEmpty }
@@ -336,7 +350,7 @@ private struct ShowMonogram: View {
     }
 
     /// Deterministic dark color from the show-title hash.
-    private var color: Color {
+    private static func makeColor(from text: String) -> Color {
         var h: UInt64 = 1469598103934665603
         for byte in text.utf8 {
             h ^= UInt64(byte)

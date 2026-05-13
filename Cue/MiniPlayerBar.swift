@@ -86,7 +86,23 @@ private struct MiniMonogram: View {
     let size: CGFloat
     let radius: CGFloat
 
-    private var monogram: String {
+    // Computed once at struct init — body reads cached values directly.
+    // The parent's body runs at 10 Hz (it reads `currentTime` for the
+    // progress strip), so without caching the FNV-1a hash + token split
+    // ran ~10×/sec. Realistic 1 µs/op × 10 → 10 µs/sec; not visible alone
+    // but multiplies across mini bar + library rows.
+    private let monogram: String
+    private let color: Color
+
+    init(text: String, size: CGFloat, radius: CGFloat) {
+        self.text = text
+        self.size = size
+        self.radius = radius
+        self.monogram = Self.makeMonogram(from: text)
+        self.color = Self.makeColor(from: text)
+    }
+
+    private static func makeMonogram(from text: String) -> String {
         let words = text
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .filter { !$0.isEmpty }
@@ -99,7 +115,7 @@ private struct MiniMonogram: View {
         return "?"
     }
 
-    private var color: Color {
+    private static func makeColor(from text: String) -> Color {
         var h: UInt64 = 1469598103934665603
         for byte in text.utf8 {
             h ^= UInt64(byte)

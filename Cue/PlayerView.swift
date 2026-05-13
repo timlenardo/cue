@@ -166,20 +166,37 @@ private struct TranscriptScrollView: View {
     @State private var scrollTopId: Int?
     @State private var didInitialScroll: Bool = false
 
+    /// Largest index `i` such that `key(arr[i]) <= target`. Returns -1
+    /// when target precedes all entries. Both transcript arrays are sorted
+    /// by `start`, so this is O(log N) — versus the O(N) reverse scans
+    /// this replaces, which at 10 Hz × 9000 words burned ~10 µs/sec
+    /// scanning in the active-word case.
+    private static func lastIndex<T>(of arr: [T], where key: (T) -> Double, leq target: Double) -> Int {
+        var lo = 0, hi = arr.count - 1, ans = -1
+        while lo <= hi {
+            let mid = (lo + hi) >> 1
+            if key(arr[mid]) <= target {
+                ans = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return ans
+    }
+
     var activeSentenceIdx: Int {
         let t = state.currentTime
-        var idx = 0
-        for s in state.transcriptSentences.reversed() where t >= s.start {
-            idx = s.id
-            break
-        }
-        return idx
+        let sentences = state.transcriptSentences
+        let i = Self.lastIndex(of: sentences, where: { $0.start }, leq: t)
+        return i >= 0 ? sentences[i].id : 0
     }
 
     var activeWordGlobalIdx: Int {
         let t = state.currentTime
-        for w in state.transcriptWords.reversed() where t >= w.start { return w.globalIdx }
-        return -1
+        let words = state.transcriptWords
+        let i = Self.lastIndex(of: words, where: { $0.start }, leq: t)
+        return i >= 0 ? words[i].globalIdx : -1
     }
 
     var body: some View {
