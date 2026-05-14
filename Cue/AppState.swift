@@ -181,6 +181,9 @@ final class AppState {
     /// Settings sheet visibility, driven by the gear button in EntryView.
     var settingsOpen: Bool = false
 
+    /// Profile sheet visibility, driven by the person button in EntryView.
+    var profileOpen: Bool = false
+
     /// Dev toggle: when on, surface every Whisper transcript as a toast over
     /// the app via `wakeTranscripts`. Wake engine arming is NOT affected —
     /// the engine still requires a loaded episode. Persisted across launches.

@@ -2,7 +2,11 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppState.self) private var state
+    @Environment(CueAPI.self) private var api
     @Environment(\.dismiss) private var dismiss
+
+    @State private var redoing = false
+    @State private var redoError: String?
 
     var body: some View {
         @Bindable var state = state
@@ -35,6 +39,16 @@ struct SettingsView: View {
                             subtitle: "Show a HUD with the live AVAudioSession mode and VPIO state.",
                             isOn: $state.audioSessionDebugEnabled
                         )
+                        Divider().background(state.palette.cardEdge).padding(.leading, 14)
+                        actionRow(
+                            title: "Redo onboarding",
+                            subtitle: redoError ?? "Clear your saved name on the server and sign out so you can walk through the phone + code + name flow again. Use the bypass code 123456 to re-enter quickly.",
+                            actionLabel: redoing ? "Resetting…" : "Reset",
+                            destructive: redoError != nil,
+                            disabled: redoing
+                        ) {
+                            Task { await redoOnboarding() }
+                        }
                     }
                 }
                 .padding(.horizontal, 22)
@@ -98,6 +112,59 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+
+    @ViewBuilder
+    private func actionRow(
+        title: String,
+        subtitle: String?,
+        actionLabel: String,
+        destructive: Bool = false,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        let palette = state.palette
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(Fonts.sans(15, weight: .medium))
+                    .foregroundStyle(palette.ink)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(Fonts.sans(12))
+                        .foregroundStyle(destructive ? .red : palette.inkMuted)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 12)
+            Button(action: action) {
+                Text(actionLabel)
+                    .font(Fonts.sans(13, weight: .semibold))
+                    .foregroundStyle(palette.bg)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(disabled ? palette.subtleStrong : palette.ink))
+            }
+            .buttonStyle(.plain)
+            .disabled(disabled)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+
+    @MainActor
+    private func redoOnboarding() async {
+        redoError = nil
+        redoing = true
+        defer { redoing = false }
+        do {
+            _ = try await api.updateAccount(name: "")
+            api.signOut()
+            dismiss()
+        } catch {
+            redoError = error.localizedDescription
+        }
     }
 }
 

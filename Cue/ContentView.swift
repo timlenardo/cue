@@ -60,6 +60,9 @@ struct ContentView: View {
         .sheet(isPresented: $state.settingsOpen) {
             SettingsView().environment(state)
         }
+        .sheet(isPresented: $state.profileOpen) {
+            ProfileView().environment(state)
+        }
     }
 }
 

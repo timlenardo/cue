@@ -4,10 +4,12 @@ struct AuthView: View {
     @Environment(AppState.self) private var state
     let api: CueAPI
 
-    enum Step { case phone, code }
+    enum Step { case phone, code, name }
     @State private var step: Step = .phone
     @State private var phone: String = ""
     @State private var code: String = ""
+    @State private var name: String = ""
+    @State private var pendingAuth: VerifyCodeResponse?
     @State private var sending = false
     @State private var errorMessage: String?
 
@@ -24,17 +26,17 @@ struct AuthView: View {
                     .foregroundStyle(palette.ink)
                     .padding(.bottom, 8)
 
-                Text("Sign in to listen + ask.")
+                Text(headline)
                     .font(Fonts.serif(28))
                     .tracking(-0.4)
                     .lineSpacing(4)
                     .foregroundStyle(palette.inkMuted)
                     .padding(.bottom, 28)
 
-                if step == .phone {
-                    phoneStep
-                } else {
-                    codeStep
+                switch step {
+                case .phone: phoneStep
+                case .code: codeStep
+                case .name: nameStep
                 }
 
                 if let msg = errorMessage {
@@ -164,12 +166,67 @@ struct AuthView: View {
         }
     }
 
+    private var nameStep: some View {
+        let palette = state.palette
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("YOUR NAME")
+                .font(Fonts.sans(11, weight: .bold))
+                .tracking(1.4)
+                .foregroundStyle(palette.inkMuted)
+
+            TextField("First name", text: $name)
+                .font(Fonts.sans(18))
+                .foregroundStyle(palette.ink)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(palette.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(palette.cardEdge, lineWidth: 0.5)
+                        )
+                )
+                .textContentType(.givenName)
+                .autocorrectionDisabled()
+                .submitLabel(.done)
+                .onSubmit { if canSaveName { Task { await saveName() } } }
+
+            Button {
+                Task { await saveName() }
+            } label: {
+                HStack(spacing: 8) {
+                    if sending { ProgressView().tint(palette.bg) }
+                    Text(sending ? "Saving…" : "Continue")
+                        .font(Fonts.sans(15, weight: .semibold))
+                }
+                .foregroundStyle(palette.bg)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(Capsule().fill(canSaveName ? palette.ink : palette.subtleStrong))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSaveName || sending)
+        }
+    }
+
+    private var headline: String {
+        switch step {
+        case .phone, .code: return "Sign in to listen + ask."
+        case .name: return "What should we call you?"
+        }
+    }
+
     private var canSendCode: Bool {
         phone.filter(\.isNumber).count >= 10
     }
 
     private var canVerify: Bool {
         code.filter(\.isNumber).count == 6
+    }
+
+    private var canSaveName: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @MainActor
@@ -192,8 +249,29 @@ struct AuthView: View {
         defer { sending = false }
         Analytics.shared.track("auth_code_submitted")
         do {
-            _ = try await api.verifyCode(phoneNumber: phone, code: code)
-            // CueAPI publishes `token`; AppRoot will re-route on the change.
+            let resp = try await api.verifyCode(phoneNumber: phone, code: code)
+            let existingName = resp.account.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if existingName.isEmpty {
+                pendingAuth = resp
+                withAnimation(.easeOut(duration: 0.22)) { step = .name }
+            } else {
+                api.applyAuth(token: resp.token, account: resp.account, isNewUser: resp.isNewUser)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func saveName() async {
+        guard let auth = pendingAuth else { return }
+        errorMessage = nil
+        sending = true
+        defer { sending = false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let updated = try await api.updateAccount(name: trimmed, tokenOverride: auth.token)
+            api.applyAuth(token: auth.token, account: updated, isNewUser: auth.isNewUser)
         } catch {
             errorMessage = error.localizedDescription
         }
