@@ -47,15 +47,6 @@ struct AuthView: View {
                 }
 
                 Spacer(minLength: 0)
-
-                #if DEBUG
-                Text("Dev tip: bypass code 123456 works for any phone number.")
-                    .font(Fonts.sans(11))
-                    .foregroundStyle(palette.inkFade)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
-                    .padding(.bottom, 8)
-                #endif
             }
             .padding(.horizontal, 22)
             .padding(.top, Geo.statusBarReserve + 24)
