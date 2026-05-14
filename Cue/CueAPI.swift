@@ -318,19 +318,48 @@ final class CueAPI {
     }
 
     func verifyCode(phoneNumber: String, code: String) async throws -> VerifyCodeResponse {
-        let resp: VerifyCodeResponse = try await post(
+        try await post(
             "/v1/auth/verify-code",
             body: ["phoneNumber": phoneNumber, "code": code]
         )
-        TokenStore.save(resp.token)
-        token = resp.token
-        account = resp.account
-        return resp
+    }
+
+    /// Commits a verified auth response — persists the JWT and exposes it on
+    /// the @Observable `token` so RootView routes into the main app. Split
+    /// from `verifyCode` so AuthView can interleave the name-onboarding step
+    /// (which calls `updateAccount` with the freshly-issued token) before
+    /// routing switches out from under the name screen.
+    func applyAuth(token: String, account: CueAccount) {
+        TokenStore.save(token)
+        self.token = token
+        self.account = account
     }
 
     func getAccount() async throws -> CueAccount {
         let resp: CueAccount = try await get("/v1/auth/account")
         account = resp
+        return resp
+    }
+
+    /// PATCH /v1/auth/account — used during onboarding to save the name the
+    /// user entered. `tokenOverride` lets AuthView authenticate the call
+    /// before it has called `applyAuth`.
+    @discardableResult
+    func updateAccount(name: String, tokenOverride: String? = nil) async throws -> CueAccount {
+        let headers: [String: String]
+        if let tokenOverride {
+            headers = ["Authorization": "Bearer \(tokenOverride)"]
+        } else {
+            headers = [:]
+        }
+        let resp: CueAccount = try await patchRaw(
+            "/v1/auth/account",
+            body: ["name": name],
+            headers: headers
+        )
+        if self.token != nil {
+            self.account = resp
+        }
         return resp
     }
 
@@ -614,9 +643,9 @@ final class CueAPI {
         return try await send(path: path, method: "POST", bodyData: data, headers: headers)
     }
 
-    private func patchRaw<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+    private func patchRaw<T: Decodable>(_ path: String, body: [String: Any], headers: [String: String] = [:]) async throws -> T {
         let data = try JSONSerialization.data(withJSONObject: body)
-        return try await send(path: path, method: "PATCH", bodyData: data)
+        return try await send(path: path, method: "PATCH", bodyData: data, headers: headers)
     }
 
     private func delete<T: Decodable>(_ path: String) async throws -> T {
