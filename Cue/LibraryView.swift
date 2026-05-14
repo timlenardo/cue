@@ -7,18 +7,13 @@ struct LibraryView: View {
         let palette = state.palette
 
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center) {
-                Text("Library")
-                    .font(Fonts.serif(28, weight: .medium))
-                    .tracking(-0.5)
-                    .foregroundStyle(palette.ink)
-                Spacer()
-                CircleIconButton(palette: palette, system: "arrow.clockwise") {
-                    Task { await state.reloadLibrary() }
-                }
-            }
-            .padding(.horizontal, 22)
-            .padding(.top, 8)
+            Text("Library")
+                .font(Fonts.serif(28, weight: .medium))
+                .tracking(-0.5)
+                .foregroundStyle(palette.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 22)
+                .padding(.top, 8)
 
             if state.library.isEmpty {
                 emptyState
