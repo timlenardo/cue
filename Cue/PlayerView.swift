@@ -135,6 +135,9 @@ private struct PlayerHeader: View {
                     .foregroundStyle(Ambient.accent.opacity(0.9))
                     .shadow(color: Ambient.accentGlow.opacity(0.35), radius: 8)
                     .lineLimit(1)
+                #if DEBUG
+                    .onLongPressGesture(minimumDuration: 0.5) { showWaveformDebug = true }
+                #endif
                 Text(state.episodeTitle)
                     .font(.system(size: 19, weight: .medium))
                     .tracking(0.4)
@@ -146,14 +149,11 @@ private struct PlayerHeader: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 12)
             .padding(.top, 2)
+            #if DEBUG
+            .sheet(isPresented: $showWaveformDebug) { WaveformDebugView() }
+            #endif
 
-            CircleHeaderButton(system: "bookmark") {}
-                #if DEBUG
-                .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in
-                    showWaveformDebug = true
-                })
-                .sheet(isPresented: $showWaveformDebug) { WaveformDebugView() }
-                #endif
+            Color.clear.frame(width: 40, height: 40)
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)
@@ -755,37 +755,14 @@ private struct SecondaryRow: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        HStack {
-            Button {} label: {
-                Image(systemName: "rectangle.split.3x1")
-                    .font(.system(size: 20, weight: .regular))
-                    .foregroundStyle(Ambient.textPast)
-                    .frame(width: 40, height: 40)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 0)
-
-            // Suppress the .repeatForever animations while the voice agent
-            // is open — SecondaryRow is dimmed to 0.15 opacity then, but
-            // SwiftUI keeps animating the (mostly invisible) bars + halo
-            // anyway because the animation engine doesn't see parent
-            // opacity. Cuts wasted GPU cycles during voice mode.
-            ListeningPill(active: state.playing && !state.voiceOpen)
-                .onTapGesture { state.openVoiceAgent() }
-
-            Spacer(minLength: 0)
-
-            Button {} label: {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 20, weight: .regular))
-                    .foregroundStyle(Ambient.textPast)
-                    .frame(width: 40, height: 40)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
+        // Suppress the .repeatForever animations while the voice agent
+        // is open — SecondaryRow is dimmed to 0.15 opacity then, but
+        // SwiftUI keeps animating the (mostly invisible) bars + halo
+        // anyway because the animation engine doesn't see parent
+        // opacity. Cuts wasted GPU cycles during voice mode.
+        ListeningPill(active: state.playing && !state.voiceOpen)
+            .frame(maxWidth: .infinity)
+            .onTapGesture { state.openVoiceAgent() }
     }
 }
 
