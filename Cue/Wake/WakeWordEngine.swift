@@ -319,6 +319,10 @@ final class WakeWordEngine: @unchecked Sendable {
         }
         lastFireAt = now
         log.info("whisper hit: '\(text, privacy: .public)'")
+        // PostHog event fires from the AppState wake.onDetect closure
+        // instead of here — AppState is @MainActor and has UIApplication
+        // access for the `in_app` property, which we need for the wake-
+        // word false-positive-vs-real-use chart in Dashboard 4.
         onDetect?()
     }
 

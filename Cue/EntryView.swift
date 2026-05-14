@@ -265,13 +265,32 @@ struct EntryView: View {
     private func submit() async {
         let raw = url.trimmingCharacters(in: .whitespaces)
         guard !raw.isEmpty else { return }
+        Analytics.shared.track(
+            "library_episode_pasted",
+            properties: ["url_host": Analytics.urlHost(raw)]
+        )
+        let resolveStart = Date()
         state.loadPhase = .resolving
         do {
             let resolved = try await api.resolvePodcast(url: raw)
+            Analytics.shared.track(
+                "podcast_resolve_completed",
+                properties: [
+                    "ok": true,
+                    "ms": Int(Date().timeIntervalSince(resolveStart) * 1000),
+                    "source": resolved.source,
+                    "url_host": Analytics.urlHost(raw),
+                ]
+            )
             guard let episode = resolved.episode else {
                 throw CueAPIError.server(status: 0, message: "That link is for a show, not a single episode. Paste an episode link.")
             }
             state.loadPhase = .transcribing(stage: "downloading", progress: nil, chunkCount: nil)
+            let transcribeStart = Date()
+            Analytics.shared.track(
+                "podcast_transcribe_started",
+                properties: ["audio_duration_s": episode.durationSeconds]
+            )
 
             var chunkCount: Int? = nil
             var transcript: TranscribeResponse? = nil
@@ -302,6 +321,16 @@ struct EntryView: View {
                 throw CueAPIError.server(status: 0, message: "Transcription ended without a result.")
             }
 
+            Analytics.shared.track(
+                "podcast_transcribe_completed",
+                properties: [
+                    "ok": true,
+                    "ms": Int(Date().timeIntervalSince(transcribeStart) * 1000),
+                    "cached": transcript.cached,
+                    "segment_count": transcript.segments.count,
+                ]
+            )
+
             // Add to library so the user can return without re-pasting. We do
             // this before loadLive so the player carries a serverEpisodeId and
             // can sync progress on the first tick.
@@ -313,6 +342,10 @@ struct EntryView: View {
                     source: resolved.source
                 )
                 serverEpisodeId = item.episode.id
+                Analytics.shared.track(
+                    "library_episode_added",
+                    properties: ["episode_id": item.episode.id]
+                )
             } catch {
                 // Library save failing shouldn't block listening; we just won't
                 // sync progress for this session.
@@ -331,6 +364,17 @@ struct EntryView: View {
             // Refresh library so the just-added episode is in the list.
             await state.reloadLibrary()
         } catch {
+            // Generic catch — covers resolve, transcribe, and unexpected
+            // failures. We don't try to attribute the stage; the loadPhase
+            // at the moment of throw tells us downstream.
+            Analytics.shared.track(
+                "library_paste_failed",
+                properties: [
+                    "ms": Int(Date().timeIntervalSince(resolveStart) * 1000),
+                    "error_message": error.localizedDescription,
+                    "url_host": Analytics.urlHost(raw),
+                ]
+            )
             state.loadPhase = .error(error.localizedDescription)
         }
     }

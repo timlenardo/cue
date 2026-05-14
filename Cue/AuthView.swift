@@ -247,6 +247,7 @@ struct AuthView: View {
         errorMessage = nil
         sending = true
         defer { sending = false }
+        Analytics.shared.track("auth_code_submitted")
         do {
             let resp = try await api.verifyCode(phoneNumber: phone, code: code)
             let existingName = resp.account.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -254,8 +255,8 @@ struct AuthView: View {
                 pendingAuth = resp
                 withAnimation(.easeOut(duration: 0.22)) { step = .name }
             } else {
-                api.applyAuth(token: resp.token, account: resp.account)
-                }
+                api.applyAuth(token: resp.token, account: resp.account, isNewUser: resp.isNewUser)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -270,7 +271,7 @@ struct AuthView: View {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let updated = try await api.updateAccount(name: trimmed, tokenOverride: auth.token)
-            api.applyAuth(token: auth.token, account: updated)
+            api.applyAuth(token: auth.token, account: updated, isNewUser: auth.isNewUser)
         } catch {
             errorMessage = error.localizedDescription
         }

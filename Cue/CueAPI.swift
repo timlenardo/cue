@@ -329,10 +329,12 @@ final class CueAPI {
     /// from `verifyCode` so AuthView can interleave the name-onboarding step
     /// (which calls `updateAccount` with the freshly-issued token) before
     /// routing switches out from under the name screen.
-    func applyAuth(token: String, account: CueAccount) {
+    func applyAuth(token: String, account: CueAccount, isNewUser: Bool) {
         TokenStore.save(token)
         self.token = token
         self.account = account
+        Analytics.shared.identify(accountId: account.id)
+        Analytics.shared.track("auth_signed_in", properties: ["new_user": isNewUser])
     }
 
     func getAccount() async throws -> CueAccount {
@@ -365,6 +367,7 @@ final class CueAPI {
 
     func signOut() {
         log.info("signOut")
+        Analytics.shared.reset()
         TokenStore.clear()
         token = nil
         account = nil
