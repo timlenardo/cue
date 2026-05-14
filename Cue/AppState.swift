@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Combine
 import Observation
 import AVFAudio
@@ -139,6 +140,14 @@ struct LiveEpisode {
     }
 }
 
+/// How a voice session was opened. Stamped on `voice_session_opened` /
+/// `_closed` PostHog events so Dashboard 3 can break "voice users" down by
+/// wake-word vs mic-tap entry.
+enum VoiceEntrySource: String {
+    case wakeWord = "wake_word"
+    case micButton = "mic_button"
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -180,8 +189,29 @@ final class AppState {
             guard oldValue != wakeTrackingEnabled else { return }
             AppState.saveWakeTracking(wakeTrackingEnabled)
             if !wakeTrackingEnabled { wakeTranscripts.removeAll() }
+            Analytics.shared.track(
+                "wake_tracking_toggled",
+                properties: ["enabled": wakeTrackingEnabled]
+            )
         }
     }
+
+    // MARK: - Analytics session state
+    //
+    // Tracked per-live-episode and per-voice-session so we can stamp
+    // duration / utterance counts onto the PostHog `_closed` event without
+    // forcing the caller to remember.
+    private var voiceSessionStartedAt: Date?
+    private var voiceSessionEntry: VoiceEntrySource?
+    private var voiceUtteranceCount: Int = 0
+    private var voiceToolCallCount: Int = 0
+    /// True once the FIRST `playback_started` event has fired for the
+    /// currently-loaded episode. Subsequent transitions into `isPlaying` fire
+    /// `playback_resumed` instead.
+    private var firstPlayFiredForLive: Bool = false
+    /// True once `playback_completed` has fired for the currently-loaded
+    /// episode. Prevents duplicate 90% fires from the per-tick sink.
+    private var completionFiredForLive: Bool = false
 
     /// Live list of in-flight transcript toasts. Each entry self-dismisses
     /// after 2s; the UI renders the array in render order, stacked.
@@ -369,7 +399,13 @@ final class AppState {
                 print("[wake] onDetect dropped — no live episode")
                 return
             }
-            self.openVoiceAgent()
+            Analytics.shared.track(
+                "wake_word_triggered",
+                properties: [
+                    "in_app": UIApplication.shared.applicationState == .active,
+                ]
+            )
+            self.openVoiceAgent(source: .wakeWord)
         }
         wake.onTranscript = { [weak self] text, isHit, levels in
             self?.addWakeTranscript(text, isHit: isHit, levels: levels)
@@ -400,6 +436,21 @@ final class AppState {
                             duration: self.totalDuration
                         )
                     }
+                    // 90% completion — fire once per loaded episode. Gated
+                    // by duration > 0 so we don't divide-by-zero before the
+                    // player learns the asset length.
+                    if !self.completionFiredForLive,
+                       self.totalDuration > 0,
+                       t / self.totalDuration >= 0.9 {
+                        self.completionFiredForLive = true
+                        Analytics.shared.track(
+                            "playback_completed",
+                            properties: [
+                                "episode_id": self.live?.serverEpisodeId,
+                                "duration_s": self.totalDuration,
+                            ]
+                        )
+                    }
                 }
             }
             .store(in: &audioSubs)
@@ -408,6 +459,32 @@ final class AppState {
             .sink { [weak self] p in
                 guard let self else { return }
                 if self.live != nil { self.playing = p }
+                // PostHog: distinguish first-play-on-this-episode from resume.
+                // loadLive resets firstPlayFiredForLive=false; the first time
+                // isPlaying flips true after that, we treat as "started".
+                if self.live != nil {
+                    if p {
+                        let event = self.firstPlayFiredForLive
+                            ? "playback_resumed"
+                            : "playback_started"
+                        self.firstPlayFiredForLive = true
+                        Analytics.shared.track(
+                            event,
+                            properties: [
+                                "episode_id": self.live?.serverEpisodeId,
+                                "position_s": self.currentTime,
+                            ]
+                        )
+                    } else {
+                        Analytics.shared.track(
+                            "playback_paused",
+                            properties: [
+                                "episode_id": self.live?.serverEpisodeId,
+                                "position_s": self.currentTime,
+                            ]
+                        )
+                    }
+                }
                 // When the user pauses, immediately push progress.
                 if !p && self.live?.serverEpisodeId != nil {
                     self.syncProgress(force: true)
@@ -602,7 +679,22 @@ final class AppState {
         updateWakeArmed()
     }
 
-    func openVoiceAgent() {
+    func openVoiceAgent(source: VoiceEntrySource = .micButton) {
+        // Stamp the entry so closeVoiceAgent's PostHog event can break the
+        // session down by wake-word vs mic-tap.
+        voiceSessionStartedAt = Date()
+        voiceSessionEntry = source
+        voiceUtteranceCount = 0
+        voiceToolCallCount = 0
+        Analytics.shared.track(
+            "voice_session_opened",
+            properties: [
+                "entry": source.rawValue,
+                "episode_id": live?.serverEpisodeId,
+                "position_seconds": currentTime,
+            ]
+        )
+
         // Freeze the play button glyph at its current value so the
         // pause→play flip from `audio.pause()` below doesn't mutate the
         // icon mid-transition. The play button isn't rendered while
@@ -665,6 +757,23 @@ final class AppState {
         Task { await session.start(context: ctx) }
     }
     func closeVoiceAgent() {
+        let durationMs: Int = voiceSessionStartedAt.map {
+            Int(Date().timeIntervalSince($0) * 1000)
+        } ?? 0
+        Analytics.shared.track(
+            "voice_session_closed",
+            properties: [
+                "entry": voiceSessionEntry?.rawValue,
+                "duration_ms": durationMs,
+                "utterance_count": voiceUtteranceCount,
+                "tool_call_count": voiceToolCallCount,
+                "trace_id": voiceSession?.traceId,
+                "ended_by": "user",
+            ]
+        )
+        voiceSessionStartedAt = nil
+        voiceSessionEntry = nil
+
         // Tear the realtime session down first so it stops claiming the
         // mic / restores audio-session config before AudioPlayer resumes.
         voiceSession?.stop()
@@ -765,7 +874,31 @@ final class AppState {
         return nil
     }
 
-    func seek(_ t: Double) {
+    /// Called by RealtimeVoiceSession whenever a Whisper-completed user
+    /// transcript lands. Bumps `voiceUtteranceCount` so the closing event has
+    /// an accurate total, and fires `voice_first_utterance` exactly once per
+    /// session.
+    func recordVoiceUtterance(isFirst: Bool) {
+        voiceUtteranceCount += 1
+        guard isFirst, let started = voiceSessionStartedAt else { return }
+        Analytics.shared.track(
+            "voice_first_utterance",
+            properties: [
+                "trace_id": voiceSession?.traceId,
+                "ms_to_first_utterance": Int(Date().timeIntervalSince(started) * 1000),
+            ]
+        )
+    }
+
+    /// Called by RealtimeTools whenever a tool fires. Bumps the per-session
+    /// counter; the dispatched-event itself is emitted by the dispatcher so
+    /// it can stamp tool-specific properties.
+    func recordVoiceToolCall() {
+        voiceToolCallCount += 1
+    }
+
+    func seek(_ t: Double, reason: String = "manual") {
+        let from = currentTime
         let clamped = max(0, min(totalDuration, t))
         if live != nil {
             audio.seek(to: clamped)
@@ -773,6 +906,15 @@ final class AppState {
         } else {
             currentTime = clamped
         }
+        Analytics.shared.track(
+            "playback_seeked",
+            properties: [
+                "episode_id": live?.serverEpisodeId,
+                "from_s": from,
+                "to_s": clamped,
+                "reason": reason,
+            ]
+        )
     }
 
     // MARK: - Library
@@ -953,6 +1095,10 @@ final class AppState {
         self.currentTime = resumeAt
         self.lastSyncedPosition = -1
         self.lastNowPlayingSecond = -1
+        // Reset PostHog playback gates so the new episode gets a fresh
+        // playback_started + playback_completed cycle.
+        self.firstPlayFiredForLive = false
+        self.completionFiredForLive = false
         if let url = URL(string: live.episode.audioUrl) {
             audio.load(url: url)
             if resumeAt > 0 { audio.seek(to: resumeAt) }

@@ -28,8 +28,51 @@ enum RealtimeTools {
 
     /// Dispatch a function_call by name. Runs on the main actor because
     /// playback tools mutate AppState / AudioPlayer.
+    ///
+    /// PostHog event emission is centralized here (not duplicated at each
+    /// return) so adding a new tool case can't accidentally drop telemetry.
     @MainActor
     static func dispatch(
+        name: String,
+        args: [String: Any],
+        state: AppState,
+        api: CueAPI,
+        traceId: String? = nil,
+        callId: String? = nil
+    ) async -> ToolDispatchResult {
+        let t0 = Date()
+        let result = await dispatchInner(
+            name: name,
+            args: args,
+            state: state,
+            api: api,
+            traceId: traceId,
+            callId: callId
+        )
+        let outputJSON: String
+        switch result {
+        case .terminal(let s), .nonTerminal(let s): outputJSON = s
+        }
+        // Heuristic: any tool result containing `"error"` or `"ok":false` is
+        // a failure. The dispatch cases below construct these strings by
+        // hand, so the substring match is reliable. If we add structured
+        // return types later, this should switch to checking those.
+        let ok = !outputJSON.contains("\"error\"") && !outputJSON.contains("\"ok\":false")
+        state.recordVoiceToolCall()
+        Analytics.shared.track(
+            "voice_tool_fired",
+            properties: [
+                "tool_name": name,
+                "ok": ok,
+                "ms": Int(Date().timeIntervalSince(t0) * 1000),
+                "trace_id": traceId,
+            ]
+        )
+        return result
+    }
+
+    @MainActor
+    private static func dispatchInner(
         name: String,
         args: [String: Any],
         state: AppState,

@@ -39,6 +39,13 @@ struct NotesView: View {
                             .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) {
+                                    Analytics.shared.track(
+                                        "note_deleted",
+                                        properties: [
+                                            "note_id": note.id,
+                                            "via": "swipe",
+                                        ]
+                                    )
                                     Task { await state.deleteNote(noteId: note.id) }
                                 } label: {
                                     Label("Delete", systemImage: "trash")
@@ -63,6 +70,10 @@ struct NotesView: View {
             // Quietly refresh whenever the tab is opened — keeps the list in
             // sync after a save-note happened in a different session.
             await state.reloadAllNotes()
+            Analytics.shared.track(
+                "notes_tab_opened",
+                properties: ["note_count": state.allNotes.count]
+            )
         }
     }
 }
@@ -134,6 +145,13 @@ private struct NoteRowView: View {
         )
         .contextMenu {
             Button(role: .destructive) {
+                Analytics.shared.track(
+                    "note_deleted",
+                    properties: [
+                        "note_id": note.id,
+                        "via": "context_menu",
+                    ]
+                )
                 Task { await state.deleteNote(noteId: note.id) }
             } label: {
                 Label("Delete", systemImage: "trash")
@@ -146,6 +164,14 @@ private struct NoteRowView: View {
     /// seek there.
     @MainActor
     private func openNote() async {
+        Analytics.shared.track(
+            "note_opened",
+            properties: [
+                "note_id": note.id,
+                "episode_id": note.episodeId,
+                "position_seconds": note.positionSeconds,
+            ]
+        )
         if state.live?.serverEpisodeId == note.episodeId {
             state.seek(note.positionSeconds)
             state.openPlayer()

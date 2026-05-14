@@ -325,6 +325,8 @@ final class CueAPI {
         TokenStore.save(resp.token)
         token = resp.token
         account = resp.account
+        Analytics.shared.identify(accountId: resp.account.id)
+        Analytics.shared.track("auth_signed_in", properties: ["new_user": resp.isNewUser])
         return resp
     }
 
@@ -336,6 +338,7 @@ final class CueAPI {
 
     func signOut() {
         log.info("signOut")
+        Analytics.shared.reset()
         TokenStore.clear()
         token = nil
         account = nil

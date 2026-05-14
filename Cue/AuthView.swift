@@ -190,6 +190,7 @@ struct AuthView: View {
         errorMessage = nil
         sending = true
         defer { sending = false }
+        Analytics.shared.track("auth_code_submitted")
         do {
             _ = try await api.verifyCode(phoneNumber: phone, code: code)
             // CueAPI publishes `token`; AppRoot will re-route on the change.

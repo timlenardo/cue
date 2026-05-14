@@ -10,6 +10,11 @@ import SwiftUI
 @main
 struct CueApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    @State private var hasFiredColdStart = false
+
+    init() {
+        Analytics.shared.configure()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -19,6 +24,13 @@ struct CueApp: App {
                     // server has the latest playback position.
                     if phase == .background || phase == .inactive {
                         AppStateAccess.current?.syncProgress(force: true)
+                    }
+                    if phase == .active {
+                        Analytics.shared.track(
+                            "app_opened",
+                            properties: ["cold_start": !hasFiredColdStart]
+                        )
+                        hasFiredColdStart = true
                     }
                 }
         }

@@ -366,7 +366,14 @@ final class RealtimeVoiceSession: NSObject {
             phase = .thinking
         case "conversation.item.input_audio_transcription.completed":
             if let transcript = json["transcript"] as? String {
+                let wasFirst = (userTranscript ?? "").isEmpty
                 userTranscript = transcript
+                // PostHog: a non-empty user transcript is the canonical
+                // "user actually spoke" signal. We bump the count on every
+                // completed transcript so closeVoiceAgent has an accurate
+                // utterance_count; we fire the named event only on the
+                // first one of the session.
+                state?.recordVoiceUtterance(isFirst: wasFirst)
             }
         case "response.created":
             phase = .thinking

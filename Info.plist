@@ -26,6 +26,10 @@
 	<string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Orbit listens for the wake phrase (&quot;Orbit&quot;) so you can ask questions about what&apos;s playing.</string>
+	<key>PostHogAPIKey</key>
+	<string>phc_vDqgztAk9wigfpj46cfo4bbf5LV7rvT9sdBySRpHg9oG</string>
+	<key>PostHogHost</key>
+	<string>https://us.i.posthog.com</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
