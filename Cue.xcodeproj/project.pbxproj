@@ -12,6 +12,7 @@
 		A76A5EB52FB4DBF2008B440B /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A76A5EB42FB4DBF2008B440B /* SwiftUI.framework */; };
 		A76A5EC22FB4DBF3008B440B /* CueLiveActivityExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A76A5EB12FB4DBF2008B440B /* CueLiveActivityExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		D1A1A1A32FB3AA3300FBBF64 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = D1A1A1A22FB3AA3300FBBF64 /* WhisperKit */; };
+		D05704122FCC11EE00FBBF64 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = D05704112FCC11EE00FBBF64 /* PostHog */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -115,6 +116,7 @@
 			files = (
 				193B62392FB3AA3200FBBF64 /* WebRTC in Frameworks */,
 				D1A1A1A32FB3AA3300FBBF64 /* WhisperKit in Frameworks */,
+				D05704122FCC11EE00FBBF64 /* PostHog in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -200,6 +202,7 @@
 			packageProductDependencies = (
 				193B62382FB3AA3200FBBF64 /* WebRTC */,
 				D1A1A1A22FB3AA3300FBBF64 /* WhisperKit */,
+				D05704112FCC11EE00FBBF64 /* PostHog */,
 			);
 			productName = Cue;
 			productReference = A70F88D02FB2BCA5003CBC24 /* Cue.app */;
@@ -311,6 +314,7 @@
 			packageReferences = (
 				193B62362FB3A7CC00FBBF64 /* XCRemoteSwiftPackageReference "WebRTC" */,
 				D1A1A1A12FB3AA3300FBBF64 /* XCRemoteSwiftPackageReference "WhisperKit" */,
+				D05704102FCC11EE00FBBF64 /* XCRemoteSwiftPackageReference "posthog-ios" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A70F88D12FB2BCA5003CBC24 /* Products */;
@@ -844,6 +848,14 @@
 				minimumVersion = 0.9.0;
 			};
 		};
+		D05704102FCC11EE00FBBF64 /* XCRemoteSwiftPackageReference "posthog-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/PostHog/posthog-ios.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -856,6 +868,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = D1A1A1A12FB3AA3300FBBF64 /* XCRemoteSwiftPackageReference "WhisperKit" */;
 			productName = WhisperKit;
+		};
+		D05704112FCC11EE00FBBF64 /* PostHog */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D05704102FCC11EE00FBBF64 /* XCRemoteSwiftPackageReference "posthog-ios" */;
+			productName = PostHog;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -455,7 +455,7 @@ private struct NoteAttachment: View {
     var body: some View {
         let yellow = Color(red: 1.0, green: 0.84, blue: 0.0)
         Button {
-            state.seek(note.positionSeconds)
+            state.seek(note.positionSeconds, reason: "note")
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "bookmark.fill")
@@ -605,7 +605,7 @@ private struct NoteMarkers: View {
                 ForEach(notes) { note in
                     let pct = max(0, min(1, note.positionSeconds / duration))
                     Button {
-                        state.seek(note.positionSeconds)
+                        state.seek(note.positionSeconds, reason: "note")
                     } label: {
                         Image(systemName: "bookmark.fill")
                             .font(.system(size: 11, weight: .semibold))
