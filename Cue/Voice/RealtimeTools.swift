@@ -9,8 +9,8 @@ private let log = Logger(subsystem: "com.toug.cue", category: "RealtimeTools")
 ///   / rewind / forward). After sending `function_call_output` we tear
 ///   the session down and resume the podcast — the user committed to
 ///   going back to listening.
-/// - `nonTerminal`: a data tool fired (search_transcript, search_internet)
-///   or pause_playback. We send `function_call_output` and a
+/// - `nonTerminal`: a data tool fired (search_transcript, search_internet,
+///   read_webpage) or pause_playback. We send `function_call_output` and a
 ///   `response.create` so the model speaks its follow-up; the session
 ///   stays open.
 enum ToolDispatchResult {
@@ -200,6 +200,28 @@ enum RealtimeTools {
                 return .nonTerminal(outputJSON: outputJSON)
             } catch {
                 log.error("search_internet failed: \(error.localizedDescription, privacy: .public)")
+                let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "'")
+                return .nonTerminal(outputJSON: #"{"error":"\#(msg)"}"#)
+            }
+
+        case "read_webpage":
+            let url = (args["url"] as? String) ?? ""
+            guard !url.isEmpty else {
+                return .nonTerminal(outputJSON: #"{"error":"empty url"}"#)
+            }
+            do {
+                let resp = try await api.readWebpage(
+                    url: url,
+                    traceId: traceId,
+                    callId: callId
+                )
+                let encoder = JSONEncoder()
+                let data = try encoder.encode(resp)
+                let outputJSON = String(data: data, encoding: .utf8) ?? #"{"error":"encode failed"}"#
+                log.info("read_webpage \(resp.content.count) chars from url=\(url, privacy: .public)")
+                return .nonTerminal(outputJSON: outputJSON)
+            } catch {
+                log.error("read_webpage failed: \(error.localizedDescription, privacy: .public)")
                 let msg = error.localizedDescription.replacingOccurrences(of: "\"", with: "'")
                 return .nonTerminal(outputJSON: #"{"error":"\#(msg)"}"#)
             }

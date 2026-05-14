@@ -240,6 +240,17 @@ struct SearchInternetResponse: Codable {
     let results: [InternetHit]
 }
 
+struct ReadWebpageRequest: Encodable {
+    let url: String
+}
+
+struct ReadWebpageResponse: Codable {
+    let url: String
+    let title: String
+    let content: String
+    let truncated: Bool
+}
+
 /// Streaming event emitted by `/v1/podcasts/transcribe` (NDJSON).
 enum TranscribeEvent {
     /// Server-side stage label.
@@ -439,6 +450,21 @@ final class CueAPI {
                 query: query,
                 limit: limit
             ),
+            headers: traceHeaders(traceId: traceId, callId: callId)
+        )
+    }
+
+    /// Server-side handler for the `read_webpage` realtime tool. Fetches
+    /// full readable content of a URL (typically chained after
+    /// `search_internet` when snippets aren't enough).
+    func readWebpage(
+        url: String,
+        traceId: String? = nil,
+        callId: String? = nil
+    ) async throws -> ReadWebpageResponse {
+        try await post(
+            "/v1/voice/tools/read-webpage",
+            body: ReadWebpageRequest(url: url),
             headers: traceHeaders(traceId: traceId, callId: callId)
         )
     }
