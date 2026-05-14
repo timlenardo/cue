@@ -43,7 +43,7 @@ struct EntryView: View {
                         .background(Circle().fill(palette.subtle))
                 }
                 .buttonStyle(.plain)
-                Button { api.signOut() } label: {
+                Button { state.profileOpen = true } label: {
                     Image(systemName: "person.crop.circle")
                         .font(.system(size: 18, weight: .regular))
                         .foregroundStyle(palette.ink)
