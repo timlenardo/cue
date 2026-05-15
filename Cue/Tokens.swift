@@ -124,6 +124,17 @@ enum PaletteName: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Brand colors
+//
+// Cross-palette accents that should look identical no matter which palette
+// is active. The saved-note gold is shared by the scrubber bookmark glyph,
+// the inline note card on the player, and the bookmark glyph on note rows
+// in the Notes tab — one source so they can't drift.
+
+enum Brand {
+    static let noteGold = Color(red: 1.0, green: 0.84, blue: 0.0)
+}
+
 // MARK: - Geometry constants
 
 enum Geo {
