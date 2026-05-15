@@ -9,14 +9,6 @@ struct EntryView: View {
     @State private var showWaveformDebug = false
     @FocusState private var urlFieldFocused: Bool
 
-    private func detectPlatform(_ raw: String) -> String? {
-        let u = raw.lowercased()
-        if u.contains("spotify") { return "Spotify" }
-        if u.contains("podcasts.apple") || u.contains("apple.com") { return "Apple Podcasts" }
-        if u.hasPrefix("http") || u.contains("://") { return "RSS / Link" }
-        return nil
-    }
-
     var body: some View {
         let palette = state.palette
 
@@ -83,21 +75,19 @@ struct EntryView: View {
             .padding(.bottom, 16)
 
             // Main card
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 14) {
-                    pasteCard
-                    Text("Orbit resolves the link, transcribes the audio with Whisper, then plays it back. Today: Spotify, Apple Podcasts, RSS.")
-                        .font(Fonts.sans(11))
-                        .lineSpacing(3)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(palette.inkFade)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 6)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 6)
-                .padding(.bottom, state.bottomDockHeight + 24)
+            VStack(spacing: 14) {
+                pasteCard
+                Text("Spotify, Apple Podcasts, and RSS supported.")
+                    .font(Fonts.sans(11))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(palette.inkFade)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 6)
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+
+            Spacer(minLength: 0)
         }
         .padding(.top, Geo.statusBarReserve)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -124,133 +114,121 @@ struct EntryView: View {
     @ViewBuilder
     private var pasteCard: some View {
         let palette = state.palette
-        let platform = detectPlatform(url)
         let trimmed = url.trimmingCharacters(in: .whitespaces)
         let canListen = !trimmed.isEmpty && !isLoading
+        let inputActive = urlFieldFocused || !url.isEmpty
 
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
+        // Fixed violet glow — independent of palette so it reads the same on
+        // every theme. Keeps the dark container's halo subtle and consistent.
+        let glow = Color(red: 0.55, green: 0.52, blue: 0.92)
+
+        VStack(spacing: 10) {
+            // Input row
+            HStack(spacing: 12) {
                 Image(systemName: "link")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(palette.bg)
-                    .frame(width: 18, height: 18)
-                    .background(Circle().fill(palette.ink))
-                Text("PASTE A LINK")
-                    .font(Fonts.sans(10.5, weight: .bold))
-                    .tracking(1.4)
+                    .font(.system(size: 16, weight: .regular))
                     .foregroundStyle(palette.inkMuted)
-                Spacer()
-            }
-            .padding(.bottom, 8)
 
-            Text("Listen to anything, instantly.")
-                .font(Fonts.sans(17, weight: .semibold))
-                .tracking(-0.2)
-                .lineSpacing(3)
+                TextField(text: $url) {
+                    Text("Paste a Spotify, Apple, or RSS link")
+                        .foregroundStyle(palette.inkMuted)
+                }
+                .font(Fonts.sans(15))
                 .foregroundStyle(palette.ink)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .focused($urlFieldFocused)
+                .frame(maxWidth: .infinity)
+                .disabled(isLoading)
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    if let platform {
-                        Text(platform.uppercased())
-                            .font(Fonts.sans(10.5, weight: .bold))
-                            .tracking(0.4)
-                            .foregroundStyle(palette.accent)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(palette.accentSoft))
-                    }
-                    TextField(text: $url) {
-                        Text("Paste a Spotify, Apple, or RSS link")
+                if !url.isEmpty {
+                    Button {
+                        url = ""
+                        if case .error = state.loadPhase { state.loadPhase = .idle }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
                             .foregroundStyle(palette.inkMuted)
                     }
-                    .font(Fonts.sans(14))
-                    .foregroundStyle(palette.ink)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                    .focused($urlFieldFocused)
-                    .frame(maxWidth: .infinity)
-                    .disabled(isLoading)
-
-                    if !url.isEmpty {
-                        Button {
-                            url = ""
-                            if case .error = state.loadPhase { state.loadPhase = .idle }
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(palette.inkMuted)
-                                .padding(6)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isLoading)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(palette.surface)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(palette.cardEdge, lineWidth: 0.5)
-                        )
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .onTapGesture {
-                    guard !isLoading else { return }
-                    urlFieldFocused = true
-                }
-
-                HStack {
-                    Text("Spotify · Apple Podcasts · RSS")
-                        .font(Fonts.sans(11))
-                        .foregroundStyle(palette.inkMuted)
-                    Spacer()
-                    Button {
-                        Task { await submit() }
-                    } label: {
-                        HStack(spacing: 8) {
-                            if isLoading {
-                                ProgressView()
-                                    .tint(palette.bg)
-                                    .scaleEffect(0.8)
-                            }
-                            Text(submitLabel)
-                                .font(Fonts.sans(13, weight: .semibold))
-                            if !isLoading {
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .bold))
-                            }
-                        }
-                        .foregroundStyle(canListen || isLoading ? palette.bg : palette.inkMuted)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 9)
-                        .background(Capsule().fill(canListen || isLoading ? palette.ink : palette.subtleStrong))
-                    }
                     .buttonStyle(.plain)
-                    .disabled(!canListen)
+                    .disabled(isLoading)
                 }
             }
-            .padding(.top, 10)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(Color.white.opacity(0.04))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .strokeBorder(
+                                inputActive ? Color.white.opacity(0.18) : Color.clear,
+                                lineWidth: 1
+                            )
+                    )
+            )
+            // CTA glow on the input until the user has pasted something.
+            .shadow(color: glow.opacity(canListen ? 0 : 0.75), radius: 18, x: 0, y: 0)
+            .shadow(color: glow.opacity(canListen ? 0 : 0.45), radius: 36, x: 0, y: 4)
+            .shadow(color: glow.opacity(canListen ? 0 : 0.20), radius: 64, x: 0, y: 10)
+            .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .onTapGesture {
+                guard !isLoading else { return }
+                urlFieldFocused = true
+            }
+            .animation(.easeInOut(duration: 0.25), value: inputActive)
+            .animation(.easeInOut(duration: 0.25), value: canListen)
+
+            // Listen button
+            Button {
+                Task { await submit() }
+            } label: {
+                HStack(spacing: 10) {
+                    if isLoading {
+                        ProgressView()
+                            .tint(canListen || isLoading ? .black : palette.inkFade)
+                            .scaleEffect(0.85)
+                    }
+                    Text(submitLabel)
+                        .font(Fonts.sans(17, weight: .semibold))
+                    if !isLoading {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(canListen || isLoading ? Color.black : palette.inkFade)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(canListen || isLoading ? Color.white : Color.white.opacity(0.08))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canListen)
+            // CTA glow on the Listen button once the user has pasted something.
+            .shadow(color: glow.opacity(canListen ? 0.32 : 0), radius: 20, x: 0, y: 0)
+            .shadow(color: glow.opacity(canListen ? 0.15 : 0), radius: 40, x: 0, y: 6)
+            .animation(.easeInOut(duration: 0.25), value: canListen)
 
             if case .error(let msg) = state.loadPhase {
                 Text(msg)
                     .font(Fonts.sans(12))
                     .foregroundStyle(.red)
-                    .padding(.top, 10)
+                    .padding(.top, 4)
             }
         }
-        .padding(16)
+        .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(palette.surface)
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
+                .fill(Color.white.opacity(0.03))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(palette.cardEdge, lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 32, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
                 )
         )
+        .shadow(color: glow.opacity(0.15), radius: 36, x: 0, y: 10)
     }
 
     private var submitLabel: String {
