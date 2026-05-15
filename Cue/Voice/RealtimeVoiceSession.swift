@@ -72,7 +72,7 @@ final class RealtimeVoiceSession: NSObject {
     @ObservationIgnored private var pendingContextMessage: String?
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
 
-    /// Forwards every realtime event to cue-server for LangSmith tracing.
+    /// Forwards every realtime event to cue-server for Langfuse tracing.
     /// Non-nil only when the server returned a traceId on session mint.
     @ObservationIgnored private var telemetry: VoiceTelemetry?
     @ObservationIgnored private(set) var traceId: String?

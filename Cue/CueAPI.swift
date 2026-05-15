@@ -197,7 +197,7 @@ struct VoiceSessionRequest: Encodable {
 /// for the WebRTC SDP exchange against `https://api.openai.com/v1/realtime/calls`.
 /// `contextMessage` is the "[Episode context — last 5 min …]" user-role
 /// message we send into the conversation once the data channel opens.
-/// `traceId` is the LangSmith root run id — present only when tracing is
+/// `traceId` is the Langfuse trace id — present only when tracing is
 /// enabled server-side. iOS echoes it back on `/v1/voice/events` POSTs and
 /// on `/v1/voice/tools/*` calls (via the `x-cue-trace-id` header).
 struct VoiceSessionResponse: Decodable {
@@ -417,7 +417,7 @@ final class CueAPI {
     ///
     /// `traceId` + `callId` flow through `x-cue-trace-id` / `x-cue-call-id`
     /// headers so cue-server can emit a `server_tool:search_transcript`
-    /// LangSmith run that ties back to the originating session + call.
+    /// Langfuse observation that ties back to the originating session + call.
     func searchTranscript(
         audioUrl: String,
         query: String,
@@ -477,7 +477,7 @@ final class CueAPI {
     }
 
     /// Forwards a batch of OpenAI Realtime data-channel events to
-    /// cue-server for LangSmith tracing. Best-effort: the response is
+    /// cue-server for Langfuse tracing. Best-effort: the response is
     /// ignored unless it fails, in which case the caller decides whether
     /// to surface the error (typically: log + drop).
     struct VoiceEventsResponse: Decodable {

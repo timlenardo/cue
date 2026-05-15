@@ -9,13 +9,13 @@ private let log = Logger(subsystem: "com.toug.cue", category: "Analytics")
 ///
 /// Best-effort by design: a missing API key, a transient network failure,
 /// or a bad property must never crash the calling code. This is the same
-/// posture VoiceTelemetry takes for the LangSmith event stream.
+/// posture VoiceTelemetry takes for the Langfuse event stream.
 ///
-/// Boundary with LangSmith:
-///   - LangSmith owns the deep, per-session trace tree of one voice call.
+/// Boundary with Langfuse:
+///   - Langfuse owns the deep, per-session trace tree of one voice call.
 ///   - PostHog owns aggregate product facts across users (DAU, funnels,
 ///     retention). The two share `trace_id` as a property on voice events
-///     so you can pivot from a PostHog row into the LangSmith run.
+///     so you can pivot from a PostHog row into the Langfuse trace.
 ///
 /// PII rules enforced at call sites (not in this file):
 ///   - distinct ID is the integer `account.id`, never the phone number.
