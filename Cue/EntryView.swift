@@ -46,14 +46,16 @@ struct EntryView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                Button { state.settingsOpen = true } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 18, weight: .regular))
-                        .foregroundStyle(palette.ink)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(palette.subtle))
+                if api.account?.isAdmin == true {
+                    Button { state.settingsOpen = true } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 18, weight: .regular))
+                            .foregroundStyle(palette.ink)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(palette.subtle))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 Button { state.profileOpen = true } label: {
                     Image(systemName: "person.crop.circle")
                         .font(.system(size: 18, weight: .regular))

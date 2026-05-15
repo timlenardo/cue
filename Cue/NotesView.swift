@@ -100,9 +100,12 @@ private struct NoteRowView: View {
                         .foregroundStyle(palette.inkMuted)
                         .lineLimit(1)
 
-                    // Primary: the note text.
+                    // Primary: the note text. Italic serif matches the
+                    // saved-note callout on the player so the artifact reads
+                    // the same wherever it surfaces.
                     Text(note.text)
-                        .font(Fonts.sans(15, weight: .medium))
+                        .font(Fonts.serif(15, weight: .medium))
+                        .italic()
                         .lineSpacing(3)
                         .foregroundStyle(palette.ink)
                         .multilineTextAlignment(.leading)
@@ -111,7 +114,7 @@ private struct NoteRowView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "bookmark.fill")
                             .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(palette.accent.opacity(0.85))
+                            .foregroundStyle(Brand.noteGold)
                         Text(Format.clock(note.positionSeconds))
                             .font(Fonts.sans(11))
                             .monospacedDigit()
