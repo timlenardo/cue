@@ -387,9 +387,18 @@ private struct SentenceBlock: View {
     }
 
     /// Active sentence — elevated card with left green border + the
-    /// currently-spoken word bolded to white.
+    /// currently-spoken word bolded to white. Square corners on the leading
+    /// edge so the green rule reads as a flush rail; trailing corners
+    /// rounded — mirrors the saved-note card.
     private var activeCard: some View {
-        HStack(alignment: .top, spacing: 0) {
+        let cardShape = UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: 14,
+            topTrailingRadius: 14,
+            style: .continuous
+        )
+        return HStack(alignment: .top, spacing: 0) {
             // Left accent bar (3px wide).
             Rectangle()
                 .fill(Ambient.accent)
@@ -411,14 +420,11 @@ private struct SentenceBlock: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            cardShape
                 .fill(Ambient.surface.opacity(0.45))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Ambient.surfaceEdge, lineWidth: 1)
-                )
+                .overlay(cardShape.stroke(Ambient.surfaceEdge, lineWidth: 1))
         )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipShape(cardShape)
         .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
         .contentShape(Rectangle())
         .onTapGesture { state.seek(sentence.start) }
@@ -445,36 +451,55 @@ private struct SentenceBlock: View {
     }
 }
 
-/// Yellow note callout rendered under a sentence whose time window
-/// contains a saved note. Uses the same gold as the scrubber bookmark
-/// so the two are visually linked. Tap → seek to the note's anchor.
+/// Saved-note callout rendered under a sentence whose time window contains
+/// a saved note. Dark card with a gold left rule + "SAVED NOTE" header — the
+/// gold matches the scrubber bookmark so the inline card and the timeline
+/// marker read as the same artifact. Tap → seek to the note's anchor.
 private struct NoteAttachment: View {
     @Environment(AppState.self) private var state
     let note: ServerNote
 
     var body: some View {
-        let yellow = Color(red: 1.0, green: 0.84, blue: 0.0)
         Button {
             state.seek(note.positionSeconds, reason: "note")
         } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "bookmark.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.black.opacity(0.7))
-                    .padding(.top, 1)
-                Text(note.text)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.black.opacity(0.85))
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .top, spacing: 0) {
+                Rectangle()
+                    .fill(Brand.noteGold)
+                    .frame(width: 3)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Brand.noteGold)
+                        Text("SAVED NOTE")
+                            .font(.system(size: 11, weight: .semibold))
+                            .tracking(1.4)
+                            .foregroundStyle(Brand.noteGold)
+                    }
+                    Text(note.text)
+                        .font(Fonts.serif(16, weight: .medium))
+                        .italic()
+                        .foregroundStyle(Ambient.textBright)
+                        .lineSpacing(3)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.leading, 14)
+                .padding(.trailing, 16)
+                .padding(.vertical, 14)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(yellow)
+            .background(Ambient.surface)
+            .clipShape(
+                .rect(
+                    topLeadingRadius: 0,
+                    bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 16,
+                    topTrailingRadius: 16,
+                    style: .continuous
+                )
             )
-            .shadow(color: yellow.opacity(0.35), radius: 8, y: 2)
         }
         .buttonStyle(.plain)
     }
@@ -609,7 +634,7 @@ private struct NoteMarkers: View {
                     } label: {
                         Image(systemName: "bookmark.fill")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color(red: 1.0, green: 0.84, blue: 0.0))
+                            .foregroundStyle(Brand.noteGold)
                             .shadow(color: .black.opacity(0.85), radius: 3, y: 1.5)
                             .shadow(color: .black.opacity(0.5), radius: 1)
                     }

@@ -8,23 +8,13 @@ struct NotesView: View {
         let notes = state.allNotes
 
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Notes")
-                    .font(Fonts.serif(28, weight: .medium))
-                    .tracking(-0.5)
-                    .foregroundStyle(palette.ink)
-                Spacer()
-                CircleIconButton(palette: palette, system: "magnifyingglass") {}
-            }
-            .padding(.horizontal, 22)
-            .padding(.top, 8)
-
-            Text("Moments you asked Orbit to save while listening.")
-                .font(Fonts.sans(12.5))
-                .foregroundStyle(palette.inkMuted)
-                .lineSpacing(2)
+            Text("Notes")
+                .font(Fonts.serif(28, weight: .medium))
+                .tracking(-0.5)
+                .foregroundStyle(palette.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 22)
-                .padding(.top, 6)
+                .padding(.top, 8)
                 .padding(.bottom, 4)
 
             if notes.isEmpty {
@@ -110,9 +100,12 @@ private struct NoteRowView: View {
                         .foregroundStyle(palette.inkMuted)
                         .lineLimit(1)
 
-                    // Primary: the note text.
+                    // Primary: the note text. Italic serif matches the
+                    // saved-note callout on the player so the artifact reads
+                    // the same wherever it surfaces.
                     Text(note.text)
-                        .font(Fonts.sans(15, weight: .medium))
+                        .font(Fonts.serif(15, weight: .medium))
+                        .italic()
                         .lineSpacing(3)
                         .foregroundStyle(palette.ink)
                         .multilineTextAlignment(.leading)
@@ -121,7 +114,7 @@ private struct NoteRowView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "bookmark.fill")
                             .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(palette.accent.opacity(0.85))
+                            .foregroundStyle(Brand.noteGold)
                         Text(Format.clock(note.positionSeconds))
                             .font(Fonts.sans(11))
                             .monospacedDigit()

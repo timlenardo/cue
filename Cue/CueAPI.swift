@@ -37,6 +37,20 @@ struct CueAccount: Codable {
     let phoneNumber: String
     let name: String?
     let preferredVoiceId: String?
+
+    // Doug + Tim. Gates dev-only UI like the orb debug sheet and the
+    // settings entry point. Match by the last 10 digits so we're robust to
+    // however the server normalizes phoneNumber (E.164 +1…, bare digits,
+    // hyphenated, etc.).
+    var isAdmin: Bool {
+        let last10 = String(phoneNumber.filter(\.isNumber).suffix(10))
+        return Self.adminPhones.contains(last10)
+    }
+
+    private static let adminPhones: Set<String> = [
+        "2039807851", // Doug
+        "3016554094", // Tim
+    ]
 }
 
 struct VerifyCodeResponse: Codable {

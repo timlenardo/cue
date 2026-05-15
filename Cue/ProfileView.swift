@@ -81,7 +81,7 @@ struct ProfileView: View {
                     Text(saveLabel)
                         .font(Fonts.sans(15, weight: .semibold))
                 }
-                .foregroundStyle(palette.bg)
+                .foregroundStyle(canSave ? palette.bg : palette.inkMuted)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
                 .background(Capsule().fill(canSave ? palette.ink : palette.subtleStrong))
