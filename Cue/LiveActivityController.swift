@@ -30,7 +30,22 @@ final class LiveActivityController {
     private var voiceMorphActive: Bool = false
     private var userGlowLevel: Double = 0
     private var assistantGlowLevel: Double = 0
+    private var assistantSpeaking: Bool = false
     private var lastGlowPushAt: Date?
+
+    // Push interval during voice mode. 0.2s = 5Hz, the rate where the
+    // system reliably re-renders without throttling or smearing
+    // consecutive snapshot crossfades into each other. Bumping this
+    // higher (e.g. 0.05 / 20Hz) doesn't keep the lock screen awake
+    // — Activity.update has no screen-wake side effect — and the
+    // visible animation actually slows down because the system drops
+    // pushes once the FrequentUpdates budget is hit.
+    static let glowPushIntervalSec: Double = 0.2
+    /// Monotonically-incrementing animation frame. Bumped by every push
+    /// (pushGlow at 5Hz during voice mode, update at 1Hz during playback)
+    /// so the widget can derive cycling animations from a single integer
+    /// rather than each animated element keeping its own state.
+    private var animationFrame: Int = 0
 
     /// Fired when the underlying Activity transitions to `.ended` /
     /// `.dismissed` (system tear-down, user swipe-away, budget exhaustion,
@@ -95,6 +110,7 @@ final class LiveActivityController {
         let now = Date()
         if let last = lastUpdateAt, now.timeIntervalSince(last) < 1.0 { return }
         lastUpdateAt = now
+        animationFrame &+= 1
 
         let state = CueActivityAttributes.ContentState(
             elapsed: elapsed,
@@ -102,7 +118,9 @@ final class LiveActivityController {
             inVoiceMode: inVoiceMode,
             voiceMorphActive: voiceMorphActive,
             userGlowLevel: userGlowLevel,
-            assistantGlowLevel: assistantGlowLevel
+            assistantGlowLevel: assistantGlowLevel,
+            assistantSpeaking: assistantSpeaking,
+            animationFrame: animationFrame
         )
         Task { await activity.update(.init(state: state, staleDate: nil)) }
         #endif
@@ -129,6 +147,7 @@ final class LiveActivityController {
 
         guard let activity else { return }
         lastUpdateAt = Date()
+        animationFrame &+= 1
 
         let state = CueActivityAttributes.ContentState(
             elapsed: elapsed,
@@ -136,7 +155,9 @@ final class LiveActivityController {
             inVoiceMode: inVoiceMode,
             voiceMorphActive: voiceMorphActive,
             userGlowLevel: userGlowLevel,
-            assistantGlowLevel: assistantGlowLevel
+            assistantGlowLevel: assistantGlowLevel,
+            assistantSpeaking: assistantSpeaking,
+            animationFrame: animationFrame
         )
         Task { await activity.update(.init(state: state, staleDate: nil)) }
         #endif
@@ -147,22 +168,30 @@ final class LiveActivityController {
     /// changed meaningfully — quiet stretches on both channels are dropped.
     /// Caller is expected to have already phase-gated each level (zero out
     /// the user channel when assistant is speaking and vice versa).
-    func pushGlow(userLevel: Double, assistantLevel: Double, elapsed: Double, playing: Bool) {
+    func pushGlow(
+        userLevel: Double,
+        assistantLevel: Double,
+        assistantSpeaking: Bool,
+        elapsed: Double,
+        playing: Bool
+    ) {
         #if canImport(ActivityKit)
         guard inVoiceMode else { return }
         let u = min(1, max(0, userLevel))
         let a = min(1, max(0, assistantLevel))
-        // Relaxed delta gate while we're characterizing animation continuity.
-        let userDelta = abs(u - userGlowLevel)
-        let assistDelta = abs(a - assistantGlowLevel)
-        if max(userDelta, assistDelta) < 0.005 { return }
+        // Delta gate disabled while the widget needs every push to
+        // advance `animationFrame` (silent stretches still need frame
+        // ticks for the dots / bars to keep cycling). 200ms throttle
+        // below is enough to bound budget consumption.
 
         let now = Date()
-        if let last = lastGlowPushAt, now.timeIntervalSince(last) < 0.2 { return }
+        if let last = lastGlowPushAt, now.timeIntervalSince(last) < Self.glowPushIntervalSec { return }
         lastGlowPushAt = now
         lastUpdateAt = now
         userGlowLevel = u
         assistantGlowLevel = a
+        self.assistantSpeaking = assistantSpeaking
+        animationFrame &+= 1
 
         guard let activity else { return }
         let state = CueActivityAttributes.ContentState(
@@ -171,7 +200,9 @@ final class LiveActivityController {
             inVoiceMode: inVoiceMode,
             voiceMorphActive: voiceMorphActive,
             userGlowLevel: u,
-            assistantGlowLevel: a
+            assistantGlowLevel: a,
+            assistantSpeaking: assistantSpeaking,
+            animationFrame: animationFrame
         )
         Task { await activity.update(.init(state: state, staleDate: nil)) }
         #endif
@@ -227,7 +258,9 @@ final class LiveActivityController {
         voiceMorphActive = false
         userGlowLevel = 0
         assistantGlowLevel = 0
+        assistantSpeaking = false
         lastGlowPushAt = nil
+        animationFrame = 0
     }
     #endif
 }

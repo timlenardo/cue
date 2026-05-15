@@ -6,6 +6,7 @@ struct EntryView: View {
 
     @State private var url: String = ""
     @State private var showOrbDebug = false
+    @State private var showWaveformDebug = false
     @FocusState private var urlFieldFocused: Bool
 
     private func detectPlatform(_ raw: String) -> String? {
@@ -30,6 +31,14 @@ struct EntryView: View {
                 if api.account?.isAdmin == true {
                     Button { showOrbDebug = true } label: {
                         Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 16, weight: .regular))
+                            .foregroundStyle(palette.ink)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(palette.subtle))
+                    }
+                    .buttonStyle(.plain)
+                    Button { showWaveformDebug = true } label: {
+                        Image(systemName: "waveform")
                             .font(.system(size: 16, weight: .regular))
                             .foregroundStyle(palette.ink)
                             .frame(width: 36, height: 36)
@@ -95,6 +104,9 @@ struct EntryView: View {
         .onTapGesture { urlFieldFocused = false }
         .sheet(isPresented: $showOrbDebug) {
             LiquidOrbDebugView()
+        }
+        .sheet(isPresented: $showWaveformDebug) {
+            WaveformPlaygroundView()
         }
     }
 
