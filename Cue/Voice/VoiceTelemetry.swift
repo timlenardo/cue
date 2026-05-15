@@ -4,7 +4,7 @@ import os
 private let log = Logger(subsystem: "com.toug.cue", category: "VoiceTelemetry")
 
 /// Buffers realtime data-channel events and batch-POSTs them to cue-server
-/// at `/v1/voice/events` so the backend can thread them into LangSmith runs.
+/// at `/v1/voice/events` so the backend can thread them into Langfuse observations.
 ///
 /// Lifecycle:
 ///   - `init(traceId:api:)` is called after `/v1/voice/session` mints a
@@ -17,9 +17,9 @@ private let log = Logger(subsystem: "com.toug.cue", category: "VoiceTelemetry")
 ///     in `Task { await tel.record(...) }` (the old shape) reordered events
 ///     non-deterministically before they reached the actor's mailbox, which
 ///     made `response.done` race past `audio_transcript.done` server-side
-///     and left assistant transcripts null on the LangSmith run.
+///     and left assistant transcripts null on the Langfuse observation.
 ///   - `stop()` cancels the loop and performs one final flush so the tail
-///     of the session always lands in LangSmith.
+///     of the session always lands in Langfuse.
 ///
 /// Best-effort by design — every POST failure is logged but never throws
 /// back to the caller, so a flaky network can't break a voice session.
@@ -40,7 +40,7 @@ actor VoiceTelemetry {
     private nonisolated(unsafe) var stoppedFlag = false
 
     /// Time between automatic flushes. The realtime UX is sub-second so
-    /// 750 ms keeps LangSmith near-real-time without spamming the backend.
+    /// 750 ms keeps Langfuse near-real-time without spamming the backend.
     private let flushIntervalNs: UInt64 = 750_000_000
 
     init(traceId: String, api: CueAPI) {

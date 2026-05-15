@@ -109,7 +109,7 @@ case "my_action":
     return .terminal(outputJSON: #"{"ok":true}"#)
 ```
 
-The `traceId` + `callId` parameters are already plumbed into `RealtimeTools.dispatch(...)` from `RealtimeVoiceSession.dispatchFunctionCall`. Forward them to `api.*` so LangSmith ties the server-side run to the voice session.
+The `traceId` + `callId` parameters are already plumbed into `RealtimeTools.dispatch(...)` from `RealtimeVoiceSession.dispatchFunctionCall`. Forward them to `api.*` so Langfuse ties the server-side observation to the voice session.
 
 ### Step 5 — API method + DTOs
 
@@ -147,7 +147,7 @@ If the tool persists data the user can browse later (like `save_note`):
 - [ ] Tool name in the iOS dispatch `case` **exactly matches** the schema name in cue-server (`grep -rn "my_tool" Cue/`). Case-sensitive.
 - [ ] Dispatch case returns `.terminal` or `.nonTerminal` to match the cue-server prompt's "ends/doesn't end conversation" line.
 - [ ] If server-backed: API method exists in `CueAPI.swift`, URL is kebab-case, DTOs match the server's `serialize*` shape field-for-field.
-- [ ] `traceId` + `callId` forwarded into the API call so LangSmith threads the run.
+- [ ] `traceId` + `callId` forwarded into the API call so Langfuse threads the observation.
 - [ ] If persisting: `AppState` collection is `@Observable`, optimistic update method exists, view reads from the collection and is mounted in `ContentView`.
 - [ ] `xcodebuild -project Cue.xcodeproj -scheme Cue -destination 'generic/platform=iOS Simulator' -configuration Debug build` succeeds with no warnings you introduced.
 - [ ] Manual test on simulator OR device: open a voice session, say the trigger phrase, watch Console.app for `RealtimeTools` log line, confirm the side effect.
