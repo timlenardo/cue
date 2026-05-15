@@ -2,9 +2,10 @@ import AppIntents
 import Foundation
 
 extension Notification.Name {
-    static let cuePlayPause     = Notification.Name("CuePlayPauseIntent")
-    static let cueSkip15Back    = Notification.Name("CueSkip15BackIntent")
-    static let cueSkip15Forward = Notification.Name("CueSkip15ForwardIntent")
+    static let cuePlayPause       = Notification.Name("CuePlayPauseIntent")
+    static let cueSkip15Back      = Notification.Name("CueSkip15BackIntent")
+    static let cueSkip15Forward   = Notification.Name("CueSkip15ForwardIntent")
+    static let cueCloseVoiceAgent = Notification.Name("CueCloseVoiceAgentIntent")
 }
 
 // AudioPlaybackIntent: when a Live Activity button uses this, iOS runs
@@ -40,6 +41,20 @@ struct Skip15ForwardIntent: AudioPlaybackIntent {
     func perform() async throws -> some IntentResult {
         await MainActor.run {
             NotificationCenter.default.post(name: .cueSkip15Forward, object: nil)
+        }
+        return .result()
+    }
+}
+
+/// Tapped from the Live Activity's Resume button while voice mode is
+/// open. Tears the realtime session down and resumes podcast playback —
+/// `AppState.closeVoiceAgent()` does the heavy lifting via notification.
+struct CloseVoiceAgentIntent: AudioPlaybackIntent {
+    static var title: LocalizedStringResource = "Resume Podcast"
+    init() {}
+    func perform() async throws -> some IntentResult {
+        await MainActor.run {
+            NotificationCenter.default.post(name: .cueCloseVoiceAgent, object: nil)
         }
         return .result()
     }

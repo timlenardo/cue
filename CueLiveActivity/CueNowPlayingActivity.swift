@@ -99,15 +99,12 @@ private struct LockScreenView: View {
     let state: CueActivityAttributes.ContentState
 
     var body: some View {
-        let inVoice = state.inVoiceMode
-        let morph   = state.voiceMorphActive
-
-        HStack(alignment: .top, spacing: 12) {
-            // Play button → orb. Swap fires on `voiceMorphActive` (phase 2)
-            // so the structural swap lands after the surrounding controls
-            // have finished dimming — same staging as PlayerView.
+        HStack(alignment: .center, spacing: 12) {
+            // Play button slot — orb during voice mode (after morph delay),
+            // plain play/pause otherwise. Same 64pt footprint in both states
+            // so the structural swap doesn't shift the row.
             ZStack {
-                if morph {
+                if state.voiceMorphActive {
                     VoiceOrbGlyph(diameter: 64, glowLevel: state.userGlowLevel)
                         .transition(.opacity)
                 } else {
@@ -119,67 +116,180 @@ private struct LockScreenView: View {
                 }
             }
             .frame(width: 64, height: 64)
-            .animation(.easeInOut(duration: 0.25), value: morph)
+            .animation(.easeInOut(duration: 0.25), value: state.voiceMorphActive)
 
-            // Right column sized to match the play button (64pt) so the
-            // bar's bottom aligns with the play button's bottom and the
-            // title's vertical center aligns with the play button's center.
-            VStack(alignment: .leading, spacing: 0) {
-                // Show eyebrow — top of the column.
-                Text(attributes.show.uppercased())
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(1.2)
-                    .foregroundStyle(LA.accent.opacity(0.9))
-                    .shadow(color: LA.accentGlow.opacity(0.35), radius: 6)
-                    .lineLimit(1)
-                    .opacity(inVoice ? 0.15 : 1)
-
-                Spacer(minLength: 0)
-
-                // Episode title + skip buttons — centered vertically in the
-                // column (= play button center). Static text, default tail
-                // truncation; no marquee.
-                HStack(alignment: .center, spacing: 8) {
-                    Text(attributes.episode)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(LA.textBright)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Button(intent: Skip15BackIntent()) {
-                        SkipGlyph(systemName: "gobackward.15")
-                    }
-                    .buttonStyle(.plain)
-
-                    Button(intent: Skip15ForwardIntent()) {
-                        SkipGlyph(systemName: "goforward.15")
-                    }
-                    .buttonStyle(.plain)
-                }
-                .opacity(inVoice ? 0.15 : 1)
-                .allowsHitTesting(!inVoice)
-
-                Spacer(minLength: 0)
-
-                // Progress + remaining time — bottom of the column, so the
-                // bar's bottom edge lines up with the play button's bottom.
-                HStack(alignment: .center, spacing: 8) {
-                    ProgressBar(
-                        elapsed: state.elapsed,
-                        duration: attributes.duration,
-                        dynamicGlow: inVoice ? state.assistantGlowLevel : nil
-                    )
-                    Text(remainingLabel(state.elapsed, duration: attributes.duration))
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(LA.textFuture)
-                        .opacity(inVoice ? 0.15 : 1)
-                }
+            // Right side — two completely different layouts based on voice
+            // mode. Outside voice mode: eyebrow / title / progress stack
+            // (no skip buttons — Now Playing widget already provides those).
+            // Inside voice mode: a single centered indicator (Listening dots
+            // or assistant bars), with a Resume button on the far right.
+            if state.inVoiceMode {
+                voiceModeContent
+            } else {
+                playbackContent
             }
-            .frame(height: 64)
         }
         .padding(14)
-        .animation(.easeInOut(duration: 0.25), value: inVoice)
+        .animation(.easeInOut(duration: 0.25), value: state.inVoiceMode)
+    }
+
+    // MARK: Non-voice layout (simplified — single invitation line)
+
+    @ViewBuilder
+    private var playbackContent: some View {
+        Text("Tap or say Orbit")
+            .font(.system(size: 18, weight: .medium))
+            .foregroundStyle(LA.textBright)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 64)
+    }
+
+    // MARK: Voice layout (Listening / bars centered, Resume on the right)
+
+    @ViewBuilder
+    private var voiceModeContent: some View {
+        HStack(alignment: .center, spacing: 10) {
+            // Indicator slot — left-aligned so "Listening…" sits just to the
+            // right of the orb, with the bar visualizer occupying the same
+            // slot when the assistant takes its turn. ZStack with opacity
+            // crossfades keeps the play-button and resume-button positions
+            // stable while the indicator swaps.
+            ZStack(alignment: .leading) {
+                ListeningIndicator(frame: state.animationFrame)
+                    .opacity(state.assistantSpeaking ? 0 : 1)
+                AssistantVisualizerRow(frame: state.animationFrame)
+                    .opacity(state.assistantSpeaking ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(.easeInOut(duration: 0.25), value: state.assistantSpeaking)
+
+            ResumeButton()
+        }
+        .frame(height: 64)
+    }
+}
+
+// MARK: - Resume button (voice mode)
+
+/// Pill button shown on the right edge of the LA during voice mode.
+/// Tapping invokes `CloseVoiceAgentIntent`, which posts the
+/// `cueCloseVoiceAgent` notification and resumes podcast playback.
+private struct ResumeButton: View {
+    var body: some View {
+        Button(intent: CloseVoiceAgentIntent()) {
+            Text("Resume")
+                .font(.system(size: 13, weight: .semibold))
+                .tracking(0.2)
+                .foregroundStyle(LA.textPrimary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(
+                    ZStack {
+                        Capsule().fill(Color.black)
+                        Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    }
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Voice-state indicators
+//
+// Continuous animation channel on the lock-screen LA: pushed `ContentState`
+// changes. SF Symbol `.symbolEffect(.variableColor, .repeating)` is
+// recognized by SwiftUI but does NOT loop independently in the widget
+// snapshot model — the system only re-renders when state changes.
+// So both indicators derive their motion from `state.animationFrame`,
+// which the app increments on every push. The system crossfades between
+// consecutive snapshots, which is what makes the dots / bars appear to
+// animate. Frame ticks at 5Hz while voice mode is open (pushGlow) and
+// 1Hz during playback (update).
+
+/// "Listening…" with three dots that cycle one-at-a-time. The dots use
+/// `.lastTextBaseline` alignment so their bottoms sit at the text's
+/// baseline — punctuation-like positioning rather than vertically
+/// centered with the cap-height.
+private struct ListeningIndicator: View {
+    let frame: Int
+
+    var body: some View {
+        HStack(alignment: .lastTextBaseline, spacing: 6) {
+            Text("Listening")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(LA.accent)
+            HStack(alignment: .bottom, spacing: 3) {
+                ForEach(0..<3, id: \.self) { i in
+                    let active = i == (frame % 3)
+                    Circle()
+                        .fill(LA.accent)
+                        .frame(width: 4, height: 4)
+                        .opacity(active ? 1.0 : 0.25)
+                        .scaleEffect(active ? 1.2 : 0.8, anchor: .bottom)
+                }
+            }
+        }
+        .shadow(color: LA.accentGlow.opacity(0.5), radius: 6)
+        .accessibilityLabel("Listening")
+    }
+}
+
+/// Row of 5 five-bar visualizers — 25 bars total — with per-group frame
+/// offsets so the wave reads as continuous across all of them rather
+/// than 5 identical units pulsing in sync.
+private struct AssistantVisualizerRow: View {
+    let frame: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<5, id: \.self) { i in
+                // 8-frame offset per group = 5 bars × spatialMultiplier 1.6
+                // ÷ temporalMultiplier 1.0, so the wave flows continuously
+                // from group N into group N+1 without a seam.
+                AssistantVisualizer(frame: frame &+ i * 8)
+            }
+        }
+        .accessibilityLabel("Assistant speaking")
+    }
+}
+
+/// Five-bar audio visualizer. Each bar's height is a phase-shifted sin
+/// of `animationFrame`. The system crossfades the heights between pushes,
+/// so the bars appear to ripple. Pure pushed-state animation — no
+/// dependence on `.symbolEffect`, which doesn't loop in widget contexts.
+private struct AssistantVisualizer: View {
+    let frame: Int
+
+    private static let barCount = 5
+    private static let baseHeight: CGFloat = 4
+    private static let maxHeight: CGFloat = 22
+    private static let barWidth: CGFloat = 3
+    /// Temporal multiplier: how fast phase advances per pushed frame.
+    /// At 5Hz pushes, 1.0 gives a ~1.25s full cycle per bar.
+    private static let temporalMultiplier: Double = 1.0
+    /// Spatial multiplier: phase offset between adjacent bars. Higher
+    /// values make the bars look like a steeper wave (more height
+    /// variation across neighbors). 1.6 matches the playground's
+    /// "Heartbeat" preset.
+    private static let spatialMultiplier: Double = 1.6
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 3) {
+            ForEach(0..<Self.barCount, id: \.self) { i in
+                Capsule()
+                    .fill(LA.accent)
+                    .frame(width: Self.barWidth, height: height(forBar: i))
+            }
+        }
+        .frame(height: Self.maxHeight, alignment: .center)
+        .shadow(color: LA.accentGlow.opacity(0.55), radius: 6)
+    }
+
+    private func height(forBar i: Int) -> CGFloat {
+        let phase = Double(frame) * Self.temporalMultiplier + Double(i) * Self.spatialMultiplier
+        let n = (sin(phase) + 1) / 2  // 0…1
+        return Self.baseHeight + (Self.maxHeight - Self.baseHeight) * CGFloat(n)
     }
 }
 
@@ -221,19 +331,6 @@ private struct VoiceOrbGlyph: View {
                 .scaleEffect(1.0 + CGFloat(glowLevel) * 0.10)
                 .shadow(color: .white.opacity(0.15 + glowLevel * 0.55), radius: 10 + glowLevel * 14)
         }
-    }
-}
-
-// MARK: - Transport buttons
-
-private struct SkipGlyph: View {
-    let systemName: String
-    var body: some View {
-        Image(systemName: systemName)
-            .font(.system(size: 22, weight: .regular))
-            .foregroundStyle(LA.textBright.opacity(0.85))
-            .frame(width: 38, height: 38)
-            .contentShape(Rectangle())
     }
 }
 

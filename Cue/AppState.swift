@@ -390,6 +390,12 @@ final class AppState {
         nc.addObserver(forName: .cueSkip15Forward, object: nil, queue: .main) { [weak self] _ in
             self?.skipFwd15()
         }
+        nc.addObserver(forName: .cueCloseVoiceAgent, object: nil, queue: .main) { [weak self] _ in
+            // Posted from the LA Resume button. Idempotent — guard against
+            // a duplicate close when voice mode is already closing.
+            guard let self, self.voiceOpen else { return }
+            self.closeVoiceAgent()
+        }
 
         wake.onDetect = { [weak self] in
             guard let self else { return }
@@ -835,7 +841,11 @@ final class AppState {
     // glow surfaces in the LA: orb halo (user) and progress bar (assistant).
     private func startLiveActivityGlowSampler() {
         stopLiveActivityGlowSampler()
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        // EXPERIMENT: timer interval matches LiveActivityController's
+        // glowPushIntervalSec (currently 0.05 = 20Hz). Testing whether
+        // high-rate Activity.update calls keep the lock screen awake.
+        let interval = LiveActivityController.glowPushIntervalSec
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.voiceOpen else { return }
                 let session = self.voiceSession
@@ -853,9 +863,14 @@ final class AppState {
                           session.outputLevel > 0.02 else { return 0 }
                     return Double(session.outputLevel)
                 }()
+                // Phase-driven (not level-gated) so the bars stay up
+                // through brief pauses within an assistant turn instead
+                // of flickering back to the Listening indicator.
+                let assistantSpeaking = (session?.phase == .speaking)
                 LiveActivityController.shared.pushGlow(
                     userLevel: userLevel,
                     assistantLevel: assistantLevel,
+                    assistantSpeaking: assistantSpeaking,
                     elapsed: self.currentTime,
                     playing: self.playing
                 )
