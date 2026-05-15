@@ -68,6 +68,10 @@ struct RootView: View {
     /// Pre-request mic permission on launch so the first tap on the voice
     /// agent doesn't have to wait on a system prompt.
     private func requestMicPermission() async {
+        #if DEBUG
+        if UITestFlag.skipMicPermission { return }
+        #endif
+
         if AVAudioApplication.shared.recordPermission == .undetermined {
             _ = await AVAudioApplication.requestRecordPermission()
         }

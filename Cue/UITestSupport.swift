@@ -23,6 +23,12 @@ enum UITestFlag {
     static var openSampleLive: Bool {
         ProcessInfo.processInfo.arguments.contains("-CueUITestOpenSampleLive")
     }
+
+    /// Skip the app's eager microphone permission request so UI tests can
+    /// measure player layout without a system alert covering the screen.
+    static var skipMicPermission: Bool {
+        ProcessInfo.processInfo.arguments.contains("-CueUITestSkipMicPermission")
+    }
 }
 
 /// Builds a `LiveEpisode` from the canned `SampleData` transcript so the

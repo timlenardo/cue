@@ -1,26 +1,14 @@
 import XCTest
 
-/// Investigation harness for the "transcript snaps to the left on initial
-/// open, then shifts right when you scroll / playback advances" bug. See
-/// the PR description for the user-visible symptom and what's been ruled
-/// out so far.
+/// Regression harness for the "transcript snaps to the left on initial
+/// open, then shifts right when you scroll / playback advances" bug.
 ///
-/// IMPORTANT — these tests do NOT currently reproduce the bug. The bug is
-/// visible on the user's real device (iPhone, see screenshots in the PR)
-/// but not on the iPhone 16 Pro / iOS 18.3.1 simulator with any of the
-/// repro paths tried so far:
-///   - Sample player only (live = nil, 12-sentence sample)
-///   - Sample LiveEpisode via real `loadLive` (12 sentences)
-///   - 60× inflated sample (~720 sentences ≈ a real podcast)
-///   - resumeAt: 0 (top of content, no real scroll on open)
-///   - resumeAt: 600 (mid-transcript, real downward scroll on open)
-///   - Pre-/post-scroll measurements
-///
-/// The tests + accessibility identifiers + `UITestFlag` infrastructure are
-/// preserved so the next person can pick up where this left off — most
-/// likely by running them on the actual reproducing device, or by adding
-/// device-side logging from `TranscriptScrollView.body` and reading via
-/// Console.app while reproducing manually.
+/// The original failure was caused by the 24pt horizontal inset living on
+/// the same `LazyVStack` that participates in `scrollTargetLayout()`. During
+/// the first programmatic `scrollPosition` settlement, SwiftUI could consume
+/// that inset and place visible sentence text at x=0. This test launches a
+/// large mid-episode transcript and measures the actual accessibility frames
+/// before and after manual scrolling.
 final class TranscriptLayoutUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -30,19 +18,15 @@ final class TranscriptLayoutUITests: XCTestCase {
     /// Loads a 60×-inflated sample transcript via the real `loadLive` flow
     /// at a mid-transcript resume position (so the scroll-to-activeIdx
     /// actually has to scroll), scrolls past the active sentence, and
-    /// asserts every visible sentence is at minX ≈ 24pt (= LazyVStack's
-    /// leading padding).
-    ///
-    /// Currently passes on simulator. If you can run this against a build
-    /// installed on the device that reproduces the bug, the assertion
-    /// should fail with minX ≈ 2pt — and the frame-dump attachment will
-    /// show the exact offsets for every sentence.
+    /// asserts every visible sentence is at minX ≈ 24pt (= the transcript
+    /// row's leading inset).
     @MainActor
     func testTranscriptLeftPaddingPreserved() throws {
         let app = XCUIApplication()
         app.launchArguments = [
             "-CueUITestBypassAuth",
             "-CueUITestOpenSampleLive",
+            "-CueUITestSkipMicPermission",
         ]
         app.launch()
 
@@ -87,7 +71,7 @@ final class TranscriptLayoutUITests: XCTestCase {
         frameDump.lifetime = .keepAlways
         add(frameDump)
 
-        let allMinXs = (initialFrames.values + scrolledFrames.values).map(\.minX)
+        let allMinXs = (Array(initialFrames.values) + Array(scrolledFrames.values)).map(\.minX)
         guard let smallest = allMinXs.min() else {
             XCTFail("no sentence frames captured")
             return

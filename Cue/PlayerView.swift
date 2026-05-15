@@ -273,6 +273,7 @@ private struct TranscriptScrollView: View {
                             activeWordIdx: activeWordIdx,
                             notes: notesById[sentence.id] ?? []
                         )
+                        .padding(.horizontal, 24)
                         .id(sentence.id)
                         .accessibilityIdentifier("transcriptSentence_\(sentence.id)")
                     }
@@ -284,10 +285,10 @@ private struct TranscriptScrollView: View {
                         .foregroundStyle(Ambient.textPast.opacity(0.7))
                         .textCase(.uppercase)
                         .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 24)
                         .padding(.vertical, 14)
                         .padding(.top, 18)
                 }
-                .padding(.horizontal, 24)
                 .padding(.top, 4)
                 .padding(.bottom, 320)
                 .scrollTargetLayout()
@@ -414,7 +415,7 @@ private struct SentenceBlock: View {
                 .foregroundStyle(Ambient.textBody)
                 .multilineTextAlignment(.leading)
                 // Tighter horizontal padding now that the card sits inside
-                // the LazyVStack's 24pt indent (no negative outer padding).
+                // the transcript row's 24pt inset (no negative outer padding).
                 // Keeps text visually close to where it sits in plain-
                 // paragraph mode — minimizes the active/inactive jump.
                 .padding(.horizontal, 12)
