@@ -479,7 +479,7 @@ private struct NoteAttachment: View {
                             .foregroundStyle(Brand.noteGold)
                     }
                     Text(note.text)
-                        .font(.system(size: 16, weight: .medium))
+                        .font(Fonts.serif(16, weight: .medium))
                         .italic()
                         .foregroundStyle(Ambient.textBright)
                         .lineSpacing(3)
