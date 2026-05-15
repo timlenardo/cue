@@ -27,14 +27,16 @@ struct EntryView: View {
                     .tracking(-0.5)
                     .foregroundStyle(palette.ink)
                 Spacer()
-                Button { showOrbDebug = true } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(palette.ink)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(palette.subtle))
+                if api.account?.isAdmin == true {
+                    Button { showOrbDebug = true } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 16, weight: .regular))
+                            .foregroundStyle(palette.ink)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(palette.subtle))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 Button { state.settingsOpen = true } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 18, weight: .regular))

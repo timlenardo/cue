@@ -37,6 +37,9 @@ struct CueAccount: Codable {
     let phoneNumber: String
     let name: String?
     let preferredVoiceId: String?
+
+    // Tim + Doug's accounts. Gates dev-only UI like the orb debug sheet.
+    var isAdmin: Bool { (1...3).contains(id) }
 }
 
 struct VerifyCodeResponse: Codable {
