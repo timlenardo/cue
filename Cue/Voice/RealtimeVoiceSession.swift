@@ -345,6 +345,7 @@ final class RealtimeVoiceSession: NSObject {
         }
         pendingContextMessage = nil
         phase = .listening
+        SoundEffectPlayer.shared.play(.voiceReady)
     }
 
     private func handleDataChannelMessage(_ data: Data) {
