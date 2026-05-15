@@ -59,29 +59,65 @@ struct LibraryView: View {
         let items = state.library
         let hero = items.first
         let rest = Array(items.dropFirst())
+        let restCount = rest.count
 
-        return ScrollView(showsIndicators: false) {
-            VStack(spacing: 0) {
-                if let hero {
-                    NowPlayingCard(item: hero)
-                        .padding(.bottom, 4)
-                }
-
-                if !rest.isEmpty {
-                    SectionLabel(label: "Up next", count: rest.count)
-                    VStack(spacing: 0) {
-                        ForEach(Array(rest.enumerated()), id: \.element.id) { idx, item in
-                            EpisodeRow(item: item)
-                            if idx < rest.count - 1 { Separator() }
+        return List {
+            if let hero {
+                NowPlayingCard(item: hero)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 14, leading: 16, bottom: 4, trailing: 16))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            Analytics.shared.track(
+                                "library_episode_removed",
+                                properties: [
+                                    "episode_id": hero.episode.id,
+                                    "via": "swipe",
+                                ]
+                            )
+                            Task { await state.removeFromLibrary(episodeId: hero.episode.id) }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
                         }
                     }
-                    .padding(.horizontal, 6)
+            }
+
+            if !rest.isEmpty {
+                Section {
+                    ForEach(Array(rest.enumerated()), id: \.element.id) { idx, item in
+                        EpisodeRow(item: item, showBottomSeparator: idx < restCount - 1)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 22, bottom: 0, trailing: 22))
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    Analytics.shared.track(
+                                        "library_episode_removed",
+                                        properties: [
+                                            "episode_id": item.episode.id,
+                                            "via": "swipe",
+                                        ]
+                                    )
+                                    Task { await state.removeFromLibrary(episodeId: item.episode.id) }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                    }
+                } header: {
+                    SectionLabel(label: "Up next", count: restCount)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                        .textCase(nil)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 24)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .scrollIndicators(.hidden)
+        .environment(\.defaultMinListRowHeight, 0)
         .refreshable {
             await state.reloadLibrary()
         }
@@ -200,6 +236,13 @@ private struct NowPlayingCard: View {
         }
         .contextMenu {
             Button(role: .destructive) {
+                Analytics.shared.track(
+                    "library_episode_removed",
+                    properties: [
+                        "episode_id": ep.id,
+                        "via": "context_menu",
+                    ]
+                )
                 Task { await state.removeFromLibrary(episodeId: ep.id) }
             } label: {
                 Label("Remove from library", systemImage: "trash")
@@ -243,6 +286,7 @@ private struct SectionLabel: View {
 private struct EpisodeRow: View {
     @Environment(AppState.self) private var state
     let item: LibraryItem
+    var showBottomSeparator: Bool = false
 
     var body: some View {
         let palette = state.palette
@@ -308,10 +352,25 @@ private struct EpisodeRow: View {
             }
             .padding(.vertical, 10)
             .contentShape(Rectangle())
+            .overlay(alignment: .bottom) {
+                if showBottomSeparator {
+                    Rectangle()
+                        .fill(palette.cardEdge)
+                        .frame(height: 0.5)
+                        .padding(.leading, 64)
+                }
+            }
         }
         .buttonStyle(.plain)
         .contextMenu {
             Button(role: .destructive) {
+                Analytics.shared.track(
+                    "library_episode_removed",
+                    properties: [
+                        "episode_id": ep.id,
+                        "via": "context_menu",
+                    ]
+                )
                 Task { await state.removeFromLibrary(episodeId: ep.id) }
             } label: {
                 Label("Remove from library", systemImage: "trash")
@@ -337,16 +396,6 @@ private struct ProgressBarMini: View {
             }
         }
         .frame(height: 3)
-    }
-}
-
-private struct Separator: View {
-    @Environment(AppState.self) private var state
-    var body: some View {
-        Rectangle()
-            .fill(state.palette.cardEdge)
-            .frame(height: 0.5)
-            .padding(.leading, 64)
     }
 }
 
