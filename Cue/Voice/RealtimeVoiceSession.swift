@@ -6,6 +6,8 @@ import WebRTC
 import os
 
 private let log = Logger(subsystem: "com.toug.cue", category: "RealtimeVoice")
+private let startupMaxAttempts = 3
+private let startupRetryBaseDelayNs: UInt64 = 350_000_000
 
 /// One OpenAI Realtime voice conversation, end-to-end.
 ///
@@ -44,6 +46,19 @@ final class RealtimeVoiceSession: NSObject {
         let totalDurationSeconds: Double?
         let episodeTitle: String
         let showTitle: String
+    }
+
+    private enum StartupStage: String {
+        case sessionMint = "session mint"
+        case peerConnection = "peer connection setup"
+        case sdpExchange = "SDP exchange"
+    }
+
+    private struct StartupFailure: LocalizedError {
+        let stage: StartupStage
+        let underlying: Error
+
+        var errorDescription: String? { underlying.localizedDescription }
     }
 
     private(set) var phase: Phase = .idle
@@ -121,6 +136,7 @@ final class RealtimeVoiceSession: NSObject {
     /// out of the `media-source` (mic) and `inbound-rtp` (assistant) stats.
     /// Empty / disconnected state decays both levels to 0.
     private func startLevelMetering() {
+        levelTimer?.cancel()
         levelTimer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in self?.pollLevels() }
@@ -184,42 +200,39 @@ final class RealtimeVoiceSession: NSObject {
         assistantTranscript = ""
         startLevelMetering()
 
-        log.info("start session episode=\(context.episodeTitle, privacy: .public) pausedAt=\(context.pausedAtSeconds)")
+        log.info("start session episode=\(context.episodeTitle, privacy: .public) pausedAt=\(context.pausedAtSeconds) maxAttempts=\(startupMaxAttempts)")
 
-        do {
-            let resp = try await api.requestVoiceSession(
-                audioUrl: context.audioUrl,
-                pausedAtSeconds: context.pausedAtSeconds,
-                totalDurationSeconds: context.totalDurationSeconds,
-                episodeTitle: context.episodeTitle,
-                showTitle: context.showTitle
-            )
-            log.info("mint ok value_prefix=\(resp.value.prefix(10), privacy: .public) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(resp.traceId ?? "<none>", privacy: .public)")
-            self.pendingContextMessage = resp.contextMessage
-            if let tid = resp.traceId {
-                self.traceId = tid
-                let tel = VoiceTelemetry(traceId: tid, api: api)
-                self.telemetry = tel
-                Task { await tel.start() }
+        for attempt in 1...startupMaxAttempts {
+            let attemptStarted = Date()
+            log.info("start attempt \(attempt)/\(startupMaxAttempts) begin")
+            do {
+                try await runStartupAttempt(context: context, attempt: attempt)
+                log.info("start attempt \(attempt)/\(startupMaxAttempts) succeeded in \(Self.elapsedMs(since: attemptStarted))ms")
+                return
+            } catch {
+                cleanupFailedStartupAttempt(error)
+
+                guard phase == .connecting else { return }
+                let canRetry = attempt < startupMaxAttempts && isRetryableStartupError(error)
+                let stage = startupStage(from: error)?.rawValue ?? "startup"
+                let details = startupFailureDetails(error)
+                log.warning("start attempt \(attempt)/\(startupMaxAttempts) failed after \(Self.elapsedMs(since: attemptStarted))ms stage=\(stage, privacy: .public) retryable=\(canRetry) details=\(details, privacy: .public)")
+
+                if canRetry {
+                    let delay = startupRetryDelayNs(attempt: attempt)
+                    log.info("start attempt \(attempt)/\(startupMaxAttempts) scheduling retry in \(String(format: "%.2f", Double(delay) / 1_000_000_000.0))s")
+                    startLevelMetering()
+                    try? await Task.sleep(nanoseconds: delay)
+                    guard phase == .connecting else { return }
+                    continue
+                }
+
+                log.error("start failed permanently after \(attempt) attempt(s) stage=\(stage, privacy: .public) details=\(details, privacy: .public)")
+                errorMessage = error.localizedDescription
+                phase = .error
+                teardown()
+                return
             }
-
-            try setupPeerConnection()
-            // POC: skip `configureAudioSessionForWebRTC` — the custom
-            // RTCAudioDevice replaces WebRTC's default ADM entirely, so
-            // WebRTC isn't operating its own audio unit and has no reason
-            // to touch the session config. MicCapture owns category/mode/
-            // VPIO; WebRTC reads/writes PCM via our ADM only.
-            registerInterruptionObserver()
-            try await performSDPExchange(ephemeralToken: resp.value)
-
-            // From here, RTCDataChannelDelegate.dataChannelDidChangeState
-            // will flip to .listening once the channel opens and we've
-            // sent the context message.
-        } catch {
-            log.error("start failed: \(error.localizedDescription, privacy: .public)")
-            errorMessage = error.localizedDescription
-            phase = .error
-            teardown()
         }
     }
 
@@ -239,6 +252,135 @@ final class RealtimeVoiceSession: NSObject {
     }
 
     // MARK: - Setup
+
+    private func runStartupAttempt(context: Context, attempt: Int) async throws {
+        let resp: VoiceSessionResponse
+        let mintStarted = Date()
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) mint begin")
+        do {
+            resp = try await api.requestVoiceSession(
+                audioUrl: context.audioUrl,
+                pausedAtSeconds: context.pausedAtSeconds,
+                totalDurationSeconds: context.totalDurationSeconds,
+                episodeTitle: context.episodeTitle,
+                showTitle: context.showTitle
+            )
+        } catch {
+            log.warning("start attempt \(attempt)/\(startupMaxAttempts) mint failed in \(Self.elapsedMs(since: mintStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
+            throw StartupFailure(stage: .sessionMint, underlying: error)
+        }
+
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) mint ok in \(Self.elapsedMs(since: mintStarted))ms expiresAt=\(resp.expiresAt ?? 0) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(resp.traceId ?? "<none>", privacy: .public)")
+        self.pendingContextMessage = resp.contextMessage
+        if let tid = resp.traceId {
+            self.traceId = tid
+            let tel = VoiceTelemetry(traceId: tid, api: api)
+            self.telemetry = tel
+            Task { await tel.start() }
+        }
+
+        let peerStarted = Date()
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) peer setup begin traceId=\(self.traceId ?? "<none>", privacy: .public)")
+        do {
+            try setupPeerConnection()
+        } catch {
+            log.warning("start attempt \(attempt)/\(startupMaxAttempts) peer setup failed in \(Self.elapsedMs(since: peerStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
+            throw StartupFailure(stage: .peerConnection, underlying: error)
+        }
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) peer setup ok in \(Self.elapsedMs(since: peerStarted))ms")
+
+        // POC: skip `configureAudioSessionForWebRTC` — the custom
+        // RTCAudioDevice replaces WebRTC's default ADM entirely, so
+        // WebRTC isn't operating its own audio unit and has no reason
+        // to touch the session config. MicCapture owns category/mode/
+        // VPIO; WebRTC reads/writes PCM via our ADM only.
+        registerInterruptionObserver()
+
+        let sdpStarted = Date()
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) SDP exchange begin traceId=\(self.traceId ?? "<none>", privacy: .public)")
+        do {
+            try await performSDPExchange(ephemeralToken: resp.value)
+        } catch {
+            log.warning("start attempt \(attempt)/\(startupMaxAttempts) SDP exchange failed in \(Self.elapsedMs(since: sdpStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
+            throw StartupFailure(stage: .sdpExchange, underlying: error)
+        }
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) SDP exchange ok in \(Self.elapsedMs(since: sdpStarted))ms traceId=\(self.traceId ?? "<none>", privacy: .public)")
+
+        // From here, RTCDataChannelDelegate.dataChannelDidChangeState
+        // will flip to .listening once the channel opens and we've
+        // sent the context message.
+    }
+
+    private func cleanupFailedStartupAttempt(_ error: Error) {
+        if let tel = telemetry {
+            let tid = traceId ?? "<none>"
+            log.info("cleanup failed startup attempt traceId=\(tid, privacy: .public) stage=\(self.startupStage(from: error)?.rawValue ?? "startup", privacy: .public)")
+            tel.record(
+                direction: .outbound,
+                type: "session.start_failed",
+                payload: [
+                    "stage": startupStage(from: error)?.rawValue ?? "startup",
+                    "error": error.localizedDescription,
+                ]
+            )
+            Task.detached { await tel.stop() }
+            telemetry = nil
+            traceId = nil
+        }
+        teardown()
+    }
+
+    private func startupStage(from error: Error) -> StartupStage? {
+        (error as? StartupFailure)?.stage
+    }
+
+    private func startupRetryDelayNs(attempt: Int) -> UInt64 {
+        startupRetryBaseDelayNs * UInt64(attempt)
+    }
+
+    private static func elapsedMs(since started: Date) -> Int {
+        Int(Date().timeIntervalSince(started) * 1000)
+    }
+
+    private func startupFailureDetails(_ error: Error) -> String {
+        let underlying = (error as? StartupFailure)?.underlying ?? error
+        if let apiError = underlying as? CueAPIError {
+            switch apiError {
+            case .server(let status, let message):
+                return "CueAPIError.server status=\(status) message=\(message)"
+            default:
+                return "CueAPIError.\(String(describing: apiError))"
+            }
+        }
+
+        let nsError = underlying as NSError
+        return "domain=\(nsError.domain) code=\(nsError.code) description=\(underlying.localizedDescription)"
+    }
+
+    private func isRetryableStartupError(_ error: Error) -> Bool {
+        guard startupStage(from: error) != .peerConnection else { return false }
+        let underlying = (error as? StartupFailure)?.underlying ?? error
+
+        if let apiError = underlying as? CueAPIError,
+           case .server(let status, _) = apiError {
+            return status == 429 || status == 500 || status == 502 || status == 503 || status == 504
+        }
+
+        let nsError = underlying as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        switch URLError.Code(rawValue: nsError.code) {
+        case .networkConnectionLost,
+             .timedOut,
+             .cannotFindHost,
+             .cannotConnectToHost,
+             .dnsLookupFailed,
+             .notConnectedToInternet,
+             .secureConnectionFailed:
+            return true
+        default:
+            return false
+        }
+    }
 
     private func setupPeerConnection() throws {
         let config = RTCConfiguration()
@@ -300,8 +442,14 @@ final class RealtimeVoiceSession: NSObject {
             mandatoryConstraints: ["OfferToReceiveAudio": "true"],
             optionalConstraints: nil
         )
+        let offerStarted = Date()
+        log.info("SDP create offer begin")
         let offer = try await pc.offer(for: offerConstraints)
+        log.info("SDP create offer ok in \(Self.elapsedMs(since: offerStarted))ms sdpChars=\(offer.sdp.count)")
+        let localStarted = Date()
+        log.info("SDP set local description begin")
         try await pc.setLocalDescription(offer)
+        log.info("SDP set local description ok in \(Self.elapsedMs(since: localStarted))ms")
 
         let url = URL(string: "https://api.openai.com/v1/realtime/calls?model=gpt-realtime-2")!
         var req = URLRequest(url: url)
@@ -310,13 +458,18 @@ final class RealtimeVoiceSession: NSObject {
         req.setValue("application/sdp", forHTTPHeaderField: "Content-Type")
         req.httpBody = offer.sdp.data(using: .utf8)
 
+        let postStarted = Date()
+        log.info("SDP POST begin url=\(url.absoluteString, privacy: .public) offerBytes=\(req.httpBody?.count ?? 0)")
         let (data, response) = try await URLSession.shared.data(for: req)
+        log.info("SDP POST transport ok in \(Self.elapsedMs(since: postStarted))ms bytes=\(data.count)")
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "RealtimeVoice", code: 201,
                           userInfo: [NSLocalizedDescriptionKey: "Non-HTTP SDP response"])
         }
+        log.info("SDP POST status=\(http.statusCode) bytes=\(data.count)")
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? "<no body>"
+            log.error("SDP POST failed status=\(http.statusCode) bodyPrefix=\(body.prefix(500), privacy: .public)")
             throw NSError(domain: "RealtimeVoice", code: http.statusCode,
                           userInfo: [NSLocalizedDescriptionKey: "OpenAI SDP exchange failed (\(http.statusCode)): \(body.prefix(500))"])
         }
@@ -325,7 +478,10 @@ final class RealtimeVoiceSession: NSObject {
                           userInfo: [NSLocalizedDescriptionKey: "Bad SDP answer encoding"])
         }
         let answer = RTCSessionDescription(type: .answer, sdp: answerSdp)
+        let remoteStarted = Date()
+        log.info("SDP set remote description begin answerChars=\(answerSdp.count)")
         try await pc.setRemoteDescription(answer)
+        log.info("SDP set remote description ok in \(Self.elapsedMs(since: remoteStarted))ms")
         log.info("SDP exchange complete, awaiting data channel open")
     }
 
