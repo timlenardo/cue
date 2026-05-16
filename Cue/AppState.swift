@@ -253,6 +253,27 @@ final class AppState {
         UserDefaults.standard.set(v, forKey: wakePausedKey)
     }
 
+    /// Dev toggle: when on, swap the wake engine from the WhisperKit free-
+    /// decode + regex path (`WakeWordEngine`) to the whisper-tiny CoreML
+    /// forced-decode scorer (`WhisperKwsEngine`). Flipping this stops the
+    /// current engine, swaps in the new one, rebinds callbacks, and re-arms
+    /// if an episode was loaded. Persisted across launches.
+    var forceDecodeWakeEnabled: Bool = AppState.loadForceDecodeWake() {
+        didSet {
+            guard oldValue != forceDecodeWakeEnabled else { return }
+            AppState.saveForceDecodeWake(forceDecodeWakeEnabled)
+            swapWakeEngine()
+        }
+    }
+
+    private static let forceDecodeWakeKey = "cue.forceDecodeWakeEnabled"
+    private static func loadForceDecodeWake() -> Bool {
+        UserDefaults.standard.bool(forKey: forceDecodeWakeKey)
+    }
+    private static func saveForceDecodeWake(_ v: Bool) {
+        UserDefaults.standard.set(v, forKey: forceDecodeWakeKey)
+    }
+
     /// Dev toggle: when on, render a small HUD with the live AVAudioSession
     /// mode and VPIO state. Persisted across launches.
     var audioSessionDebugEnabled: Bool = AppState.loadAudioSessionDebug() {
@@ -334,7 +355,18 @@ final class AppState {
     var voiceSession: RealtimeVoiceSession?
 
     @ObservationIgnored let audio = AudioPlayer()
-    @ObservationIgnored let wake = WakeWordEngine()
+    /// Current wake engine. `var` (not `let`) so the dev
+    /// `forceDecodeWakeEnabled` toggle can swap implementations at runtime
+    /// via `swapWakeEngine()`. Both implementations conform to `WakeEngine`,
+    /// so AppState wiring sites (callbacks, start/stop) don't care which.
+    @ObservationIgnored var wake: WakeEngine = AppState.makeWakeEngine()
+
+    private static func makeWakeEngine() -> WakeEngine {
+        if UserDefaults.standard.bool(forKey: forceDecodeWakeKey) {
+            return WhisperKwsEngine()
+        }
+        return WakeWordEngine()
+    }
     /// Mirrors the scene phase so updateWakeArmed() knows whether to listen.
     /// RootView pushes updates via sceneDidChange(active:).
     @ObservationIgnored private var scenePhaseActive: Bool = true
@@ -397,28 +429,7 @@ final class AppState {
             self.closeVoiceAgent()
         }
 
-        wake.onDetect = { [weak self] in
-            guard let self else { return }
-            // Defensive: the gating in updateWakeArmed should already prevent
-            // wake from listening with no episode loaded, but if an in-flight
-            // inference completes after stop() (or any other edge case leaks
-            // a fire), refuse to open the agent — the user has nothing
-            // loaded to talk about.
-            guard self.live != nil else {
-                print("[wake] onDetect dropped — no live episode")
-                return
-            }
-            Analytics.shared.track(
-                "wake_word_triggered",
-                properties: [
-                    "in_app": UIApplication.shared.applicationState == .active,
-                ]
-            )
-            self.openVoiceAgent(source: .wakeWord)
-        }
-        wake.onTranscript = { [weak self] text, isHit, levels in
-            self?.addWakeTranscript(text, isHit: isHit, levels: levels)
-        }
+        bindWakeCallbacks()
 
         // Mirror AudioPlayer's time + playing state into AppState so the
         // transcript / progress views update reactively. `AudioPlayer`
@@ -577,6 +588,53 @@ final class AppState {
             withAnimation(.easeIn(duration: 0.22)) {
                 self.wakeTranscripts.removeAll { $0.id == toast.id }
             }
+        }
+    }
+
+    /// Attach `onDetect` / `onTranscript` to the current `wake` instance.
+    /// Called from `init()` and re-called by `swapWakeEngine()` after a
+    /// toggle flip replaces the engine.
+    @MainActor
+    private func bindWakeCallbacks() {
+        wake.onDetect = { [weak self] in
+            guard let self else { return }
+            // Defensive: the gating in updateWakeArmed should already prevent
+            // wake from listening with no episode loaded, but if an in-flight
+            // inference completes after stop() (or any other edge case leaks
+            // a fire), refuse to open the agent — the user has nothing
+            // loaded to talk about.
+            guard self.live != nil else {
+                print("[wake] onDetect dropped — no live episode")
+                return
+            }
+            Analytics.shared.track(
+                "wake_word_triggered",
+                properties: [
+                    "in_app": UIApplication.shared.applicationState == .active,
+                ]
+            )
+            self.openVoiceAgent(source: .wakeWord)
+        }
+        wake.onTranscript = { [weak self] text, isHit, levels in
+            self?.addWakeTranscript(text, isHit: isHit, levels: levels)
+        }
+    }
+
+    /// Stop the current engine, instantiate the one selected by the
+    /// `forceDecodeWakeEnabled` toggle, rebind callbacks, and re-arm if an
+    /// episode is loaded. Called from the toggle's `didSet`.
+    @MainActor
+    private func swapWakeEngine() {
+        let wasArmed = wakeArmed
+        wake.stop()
+        wakeArmed = false
+        wake = Self.makeWakeEngine()
+        bindWakeCallbacks()
+        // Re-evaluate the armed condition against the (still-current)
+        // live / voiceOpen / wakePaused state. updateWakeArmed is
+        // idempotent and will start the new engine if appropriate.
+        if wasArmed {
+            updateWakeArmed()
         }
     }
 

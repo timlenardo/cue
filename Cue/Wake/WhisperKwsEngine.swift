@@ -1,0 +1,336 @@
+#if os(iOS)
+//
+//  WhisperKwsEngine.swift
+//  Cue
+//
+//  WakeEngine implementation using whisper-tiny CoreML forced-decode
+//  (sliding-window-max teacher-forced decoding). Drop-in replacement for
+//  `WakeWordEngine` behind the `cue.forceDecodeWakeEnabled` toggle.
+//
+//  Mic plumbing (rolling 16 kHz ring buffer, resampling, level tracking,
+//  throttled inference, debounce) is intentionally a near-copy of
+//  `WakeWordEngine` — the differences live in the inference step.
+//
+//  Per inference round:
+//    1. Snapshot the rolling 2 s window of 16 kHz mono float audio.
+//    2. Hand to `WhisperKwsScorer.maxScores(in:)` — slides a 0.8 s / 0.2 s
+//       window across the buffer, batched forced-decode against the
+//       registered keyword variants, returns per-keyword max scores.
+//    3. If any keyword scores ≥ threshold, fire `onDetect` (debounced).
+//
+//  The "transcript" surfaced via `onTranscript` is a synthesised line like
+//  `orbit: -5.42` (best variant + score) so the dev tracking HUD still
+//  shows readable evidence of what the engine is seeing.
+//
+
+import AVFoundation
+import Foundation
+import OSLog
+
+final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
+
+    // MARK: - WakeEngine surface
+
+    var onDetect: (@MainActor () -> Void)?
+    var onTranscript: (@MainActor (_ text: String, _ isHit: Bool, _ levels: AudioLevelStats?) -> Void)?
+
+    enum State { case idle, loading, listening, denied, failed(String) }
+    private(set) var state: State = .idle
+
+    // MARK: - Tunables (parallel WakeWordEngine constants where it makes sense)
+
+    private static let TargetSampleRate: Double = 16_000
+    private static let WindowSeconds: Double = 2.0
+    private static let WindowSamples: Int = Int(16_000 * 2)
+    /// Inference cadence. Forced-decode on a 2 s rolling buffer is ~7
+    /// sliding windows; on-device per-window cost is roughly 10-15 ms,
+    /// so ~80-100 ms total per inference. 250 ms cadence keeps headroom.
+    private static let InferenceIntervalMs: Int = 250
+    private static let MinAudioMs: Int = 200
+    private static let Debounce: TimeInterval = 1.5
+
+    /// Software gain applied to resampled samples. Same rationale as
+    /// `WakeWordEngine`: VPIO's AGC leaves samples peaking at ±0.1–0.2;
+    /// boost 3× to land in Whisper's training distribution.
+    private static let SoftwareGain: Float = 3.0
+    /// Silence padding (ms) prepended to each inference window. Forced-decode
+    /// doesn't strictly need this, but the encoder is shape-fixed at 30 s
+    /// regardless — the pad is internal to the scorer.
+    private static let LeadingSilencePadMs: Int = 0
+
+    /// Keywords scored each round. Match the trigger variants in
+    /// `WakeWordEngine.TriggerPattern` so user-facing copy stays consistent.
+    private static let Keywords: [String] = ["orbit", "orbital", "orbits"]
+    /// Score threshold. Onit-beacon's permissive default is −8.0 for
+    /// transcript rescore (where the perplexity gate filters FPs). Wake-word
+    /// has no second stage, so we ship slightly stricter at −7.0 and expect
+    /// to recalibrate with real-device dogfood data.
+    static let Threshold: Float = -7.0
+
+    /// Mirrors `WakeWordEngine.userVisibleTriggers` for any UI that wants
+    /// the trigger list.
+    static let userVisibleTriggers = "orbit / orbital / orbits"
+
+    // MARK: - State
+
+    private var lastFireAt: Date = .distantPast
+    private let stateLock = NSLock()
+    private var lastInferenceAt: Date = .distantPast
+    private var inferenceInFlight: Bool = false
+    private var scorerReady: Bool = false
+
+    // Rolling 16 kHz mono buffer.
+    private let bufLock = NSLock()
+    private var rolling = RingBuffer<Float>(capacity: WindowSamples, fill: 0)
+
+    // Per-window audio level stats — same pattern as WakeWordEngine.
+    private var windowPreGainPeak: Float = 0
+    private var windowPostGainPeak: Float = 0
+    private var windowClippedCount: Int = 0
+    private var windowSampleCount: Int = 0
+
+    // Mic subscription / resampler.
+    private var bufferToken: UUID?
+    private let convertLock = NSLock()
+    private var converter: AVAudioConverter?
+    private var sourceFormat: AVAudioFormat?
+    private var targetFormat: AVAudioFormat?
+
+    private let log = Logger(subsystem: "app.cue", category: "wakeKWS")
+
+    // MARK: - Public lifecycle
+
+    @MainActor
+    func start() {
+        guard bufferToken == nil else { return }
+        loadScorerIfNeeded()
+        bufferToken = MicCapture.shared.addBufferHandler { [weak self] buffer, _ in
+            self?.handle(buffer: buffer)
+        }
+        state = .listening
+        log.info("kws wake handler registered")
+    }
+
+    @MainActor
+    func stop() {
+        if let token = bufferToken {
+            MicCapture.shared.removeBufferHandler(token)
+            bufferToken = nil
+        }
+        bufLock.lock()
+        rolling.removeAll()
+        windowPreGainPeak = 0
+        windowPostGainPeak = 0
+        windowClippedCount = 0
+        windowSampleCount = 0
+        bufLock.unlock()
+        stateLock.lock()
+        lastInferenceAt = .distantPast
+        stateLock.unlock()
+        if case .listening = state { state = .idle }
+        log.info("kws wake handler unregistered")
+    }
+
+    // MARK: - Scorer boot
+
+    @MainActor
+    private func loadScorerIfNeeded() {
+        if scorerReady { return }
+        if case .loading = state { return }
+        state = .loading
+        log.info("kws scorer loading…")
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try await WhisperKwsScorer.shared.loadIfNeeded(keywords: WhisperKwsEngine.Keywords)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.scorerReady = true
+                    if self.bufferToken != nil {
+                        self.state = .listening
+                    } else {
+                        self.state = .idle
+                    }
+                    self.log.info("kws scorer ready")
+                }
+            } catch {
+                let msg = error.localizedDescription
+                await MainActor.run {
+                    self?.state = .failed(msg)
+                    self?.log.error("kws scorer load failed: \(msg, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Audio path (audio render thread)
+
+    private nonisolated func handle(buffer: AVAudioPCMBuffer) {
+        let result = resample(buffer: buffer)
+        guard !result.samples.isEmpty else { return }
+
+        bufLock.lock()
+        result.samples.withUnsafeBufferPointer { rolling.pushBack($0) }
+        if result.preGainPeak > windowPreGainPeak { windowPreGainPeak = result.preGainPeak }
+        if result.postGainPeak > windowPostGainPeak { windowPostGainPeak = result.postGainPeak }
+        windowClippedCount += result.clippedCount
+        windowSampleCount += result.samples.count
+        let availableCount = rolling.count
+        bufLock.unlock()
+
+        let minSamples = Int(Self.TargetSampleRate * Double(Self.MinAudioMs) / 1000.0)
+        guard availableCount >= minSamples else { return }
+
+        let now = Date()
+        stateLock.lock()
+        let dueMs = now.timeIntervalSince(lastInferenceAt) * 1000
+        if dueMs < Double(Self.InferenceIntervalMs) || inferenceInFlight || !scorerReady {
+            stateLock.unlock()
+            return
+        }
+        lastInferenceAt = now
+        inferenceInFlight = true
+        stateLock.unlock()
+
+        bufLock.lock()
+        let snapshot = rolling.snapshot()
+        let levels: AudioLevelStats? = windowSampleCount > 0
+            ? AudioLevelStats(
+                preGainPeak: windowPreGainPeak,
+                postGainPeak: windowPostGainPeak,
+                clippedCount: windowClippedCount,
+                sampleCount: windowSampleCount
+            )
+            : nil
+        windowPreGainPeak = 0
+        windowPostGainPeak = 0
+        windowClippedCount = 0
+        windowSampleCount = 0
+        bufLock.unlock()
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.runInference(samples: snapshot, levels: levels)
+            self?.stateLock.lock()
+            self?.inferenceInFlight = false
+            self?.stateLock.unlock()
+        }
+    }
+
+    private nonisolated func runInference(samples: [Float], levels: AudioLevelStats?) async {
+        // Optional leading silence pad (currently 0 — forced-decode handles
+        // padding internally inside the mel call).
+        let padSamples = Int(Self.TargetSampleRate * Double(Self.LeadingSilencePadMs) / 1000.0)
+        let padded: [Float] = padSamples > 0
+            ? Array(repeating: Float(0), count: padSamples) + samples
+            : samples
+        do {
+            let scores = try await WhisperKwsScorer.shared.maxScores(in: padded)
+            guard let best = scores.max(by: { $0.score < $1.score }) else { return }
+            await MainActor.run { self.handleScores(scores, best: best, levels: levels) }
+        } catch {
+            let msg = error.localizedDescription
+            log.error("kws inference failed: \(msg, privacy: .public)")
+        }
+    }
+
+    @MainActor
+    private func handleScores(_ scores: [WhisperKwsScore], best: WhisperKwsScore, levels: AudioLevelStats?) {
+        let isHit = best.score >= Self.Threshold
+
+        // Synthesize a transcript-like string for the dev HUD. Same surface
+        // contract as WakeWordEngine.onTranscript so the toast stack works
+        // unchanged.
+        let display = String(format: "%@: %.2f", best.keyword, best.score)
+        onTranscript?(display, isHit, levels)
+
+        guard isHit else { return }
+
+        let now = Date()
+        if now.timeIntervalSince(lastFireAt) < Self.Debounce {
+            log.info("kws hit (debounced): \(display, privacy: .public)")
+            return
+        }
+        lastFireAt = now
+        log.info("kws hit: \(display, privacy: .public)")
+        onDetect?()
+    }
+
+    // MARK: - Resampler (audio render thread)
+    //
+    // Identical structure to WakeWordEngine.resample — duplicated rather
+    // than factored so the two engines have zero shared mutable state.
+
+    private struct ResampleResult {
+        let samples: [Float]
+        let preGainPeak: Float
+        let postGainPeak: Float
+        let clippedCount: Int
+    }
+
+    private nonisolated func resample(buffer: AVAudioPCMBuffer) -> ResampleResult {
+        let bufFormat = buffer.format
+        convertLock.lock()
+        if sourceFormat?.sampleRate != bufFormat.sampleRate
+            || sourceFormat?.channelCount != bufFormat.channelCount {
+            guard let target = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: Self.TargetSampleRate,
+                channels: 1,
+                interleaved: false
+            ) else {
+                convertLock.unlock()
+                return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
+            }
+            sourceFormat = bufFormat
+            targetFormat = target
+            converter = AVAudioConverter(from: bufFormat, to: target)
+            log.info("kws converter ready: \(bufFormat.sampleRate, format: .fixed(precision: 0))Hz x \(bufFormat.channelCount)ch -> 16kHz mono")
+        }
+        guard let converter, let target = targetFormat else {
+            convertLock.unlock()
+            return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
+        }
+        convertLock.unlock()
+
+        let outCapacity = AVAudioFrameCount(
+            Double(buffer.frameLength) * target.sampleRate / bufFormat.sampleRate + 64
+        )
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else {
+            return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
+        }
+        var error: NSError?
+        var fed = false
+        let status = converter.convert(to: out, error: &error) { _, status in
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard status != .error, let channelData = out.floatChannelData?[0] else {
+            if let error { log.error("kws convert: \(error.localizedDescription, privacy: .public)") }
+            return ResampleResult(samples: [], preGainPeak: 0, postGainPeak: 0, clippedCount: 0)
+        }
+        let frameCount = Int(out.frameLength)
+        var samples = [Float](repeating: 0, count: frameCount)
+        let gain = Self.SoftwareGain
+        var preGainPeak: Float = 0
+        var postGainPeak: Float = 0
+        var clippedCount = 0
+        for i in 0..<frameCount {
+            let raw = channelData[i]
+            let absRaw = abs(raw)
+            if absRaw > preGainPeak { preGainPeak = absRaw }
+            let amplified = raw * gain
+            let absAmp = abs(amplified)
+            if absAmp > postGainPeak { postGainPeak = absAmp }
+            if absAmp >= 1.0 { clippedCount += 1 }
+            samples[i] = max(-1.0, min(1.0, amplified))
+        }
+        return ResampleResult(
+            samples: samples,
+            preGainPeak: preGainPeak,
+            postGainPeak: postGainPeak,
+            clippedCount: clippedCount
+        )
+    }
+}
+#endif

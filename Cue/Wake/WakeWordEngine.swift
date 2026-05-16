@@ -22,7 +22,7 @@ import WhisperKit
 /// **Model**
 /// - "openai_whisper-tiny.en" — ~39 M params, ~75 MB on disk. Auto-
 ///   downloaded from HuggingFace on first launch and cached locally.
-final class WakeWordEngine: @unchecked Sendable {
+final class WakeWordEngine: WakeEngine, @unchecked Sendable {
 
     /// Fires whenever the wake phrase is recognised (already on @MainActor).
     /// Debounced by `Debounce` seconds.

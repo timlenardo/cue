@@ -17,3 +17,11 @@ Pods/
 
 # Carthage
 Carthage/Build/
+
+# Whisper KWS CoreML assets — large binaries (~85 MB), copied from
+# onit-beacon's Resources/WhisperKWS. See WAKE-FORCED-DECODE-PLAN.md
+# for the copy recipe.
+Cue/Resources/WhisperKWS/*.mlmodelc/
+Cue/Resources/WhisperKWS/*.mlpackage/
+Cue/Resources/WhisperKWS/vocab.json
+Cue/Resources/WhisperKWS/merges.txt

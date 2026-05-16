@@ -17,6 +17,12 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     section(title: "Developer") {
                         toggleRow(
+                            title: "Forced-decode wake engine",
+                            subtitle: "Replace the default WhisperKit transcribe-and-regex wake-word path with a whisper-tiny CoreML forced-decode scorer (sliding-window mean log-prob over the keyword tokens). Scores the keyword phrase directly against the audio instead of round-tripping through text. Flipping this stops the current engine and starts the other.",
+                            isOn: $state.forceDecodeWakeEnabled
+                        )
+                        Divider().background(state.palette.cardEdge).padding(.leading, 14)
+                        toggleRow(
                             title: "Pause listening",
                             subtitle: "Hold the wake-word engine down even while an episode is loaded, so ambient conversation can't trigger the AI. Voice mode can still be opened manually.",
                             isOn: $state.wakePaused
