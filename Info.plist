@@ -24,6 +24,8 @@
 	<true/>
 	<key>MinimumOSVersion</key>
 	<string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Orbit does not use the camera. This description is required because a third-party voice library (WebRTC) references the camera API.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Orbit listens for the wake phrase (&quot;Orbit&quot;) so you can ask questions about what&apos;s playing.</string>
 	<key>PostHogAPIKey</key>
