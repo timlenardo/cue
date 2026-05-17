@@ -108,6 +108,37 @@ struct TranscribeResponse: Codable {
     let durationSeconds: Double?
 }
 
+/// Lifecycle of a library row. Podcasts arrive `ready`; article-derived
+/// episodes start `processing` while the server's Edge TTS worker runs,
+/// then flip to `ready` (audio + transcript cached) or `failed`.
+enum EpisodeStatus: String, Codable {
+    case ready, processing, failed
+
+    /// Tolerate unknown values so a future server-side status doesn't
+    /// brick the whole library decode. Anything we don't recognize is
+    /// treated as `processing` — same as "not yet playable", which keeps
+    /// the row out of any code path that would hand the synthetic URL to
+    /// AVPlayer.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = EpisodeStatus(rawValue: raw) ?? .processing
+    }
+}
+
+/// Parsed article metadata attached to episodes derived from saved web
+/// pages (source == "article"). Null on podcast rows. Drives the
+/// processing-card preview (title + site + image are all available the
+/// moment the row appears, before TTS finishes).
+struct ArticleSourceMetadata: Codable, Equatable {
+    let originalUrl: String
+    let siteName: String?
+    let author: String?
+    let excerpt: String?
+    let featuredImage: String?
+    let wordCount: Int?
+    let estimatedReadingTimeMinutes: Int?
+}
+
 /// One episode in a user's library, including the resolved metadata.
 struct ServerEpisode: Codable, Equatable {
     let id: Int
@@ -123,6 +154,12 @@ struct ServerEpisode: Codable, Equatable {
     let episodeDescription: String?
     let episodeArtworkUrl: String?
     let durationSeconds: Double?
+    /// Server-side row lifecycle. `processing` and `failed` rows must NOT
+    /// be handed to AVPlayer — `audioUrl` is a synthetic `cue-tts://…`
+    /// placeholder until status flips to `ready`.
+    let status: EpisodeStatus
+    /// Non-null only for `source == "article"` rows.
+    let articleSourceMetadata: ArticleSourceMetadata?
 }
 
 struct LibraryItem: Codable, Identifiable, Equatable {
