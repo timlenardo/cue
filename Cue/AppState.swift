@@ -343,6 +343,13 @@ final class AppState {
     @ObservationIgnored private var micArmedForWake: Bool = false
     @ObservationIgnored private var audioSubs: Set<AnyCancellable> = []
     @ObservationIgnored private var progressSyncTimer: AnyCancellable?
+    /// Polls `/v1/library` every 5s while the Library tab is foregrounded
+    /// and at least one row is in `processing`. Drives the article-TTS
+    /// "Generating audio…" → "Ready to play" transition without APNs.
+    @ObservationIgnored private var libraryPollTimer: AnyCancellable?
+    /// Mirrors LibraryView's onAppear/onDisappear so updateLibraryPolling
+    /// only ticks while the user is actually on the tab.
+    @ObservationIgnored private var libraryTabVisible: Bool = false
     /// Polls voiceSession.inputLevel at 5Hz while voice mode is open and
     /// forwards it to the Live Activity glow channel. Throttling /
     /// delta-gating happens inside `LiveActivityController.pushGlow`.
@@ -538,9 +545,18 @@ final class AppState {
         scenePhaseActive = active
         if !active {
             stopLiveActivityGlowSampler()
-        } else if voiceOpen, voiceSession != nil {
-            startLiveActivityGlowSampler()
+        } else {
+            if voiceOpen, voiceSession != nil {
+                startLiveActivityGlowSampler()
+            }
+            // Per the article-TTS brief: refetch the library once on
+            // foreground when any row is still processing — picks up the
+            // ready/failed flip the user missed while backgrounded.
+            if hasProcessingLibraryRow {
+                Task { await reloadLibrary() }
+            }
         }
+        updateLibraryPolling()
     }
 
     /// Push a transcript into the toast stack and schedule its 2s removal.
@@ -946,11 +962,60 @@ final class AppState {
             // Quiet on launch — the library will appear empty rather than blocking.
             print("[Cue] library reload failed: \(error)")
         }
+        // Newly-fetched rows may have flipped processing→ready or removed
+        // the last processing row entirely; re-evaluate the poll loop.
+        updateLibraryPolling()
+    }
+
+    // MARK: - Library tab visibility / processing-row polling
+
+    var hasProcessingLibraryRow: Bool {
+        library.contains { $0.episode.status == .processing }
+    }
+
+    /// Called from LibraryView.onAppear. Triggers an immediate fetch (the
+    /// existing tab-open refresh) and starts the 5s poll loop if needed.
+    func libraryTabAppeared() {
+        libraryTabVisible = true
+        Task { await reloadLibrary() }
+    }
+
+    /// Called from LibraryView.onDisappear. Stops the poll loop — we
+    /// don't want it firing every 5s while the user is on Listen / Notes.
+    func libraryTabDisappeared() {
+        libraryTabVisible = false
+        updateLibraryPolling()
+    }
+
+    private func updateLibraryPolling() {
+        let shouldPoll = libraryTabVisible && scenePhaseActive && hasProcessingLibraryRow
+        if shouldPoll {
+            guard libraryPollTimer == nil else { return }
+            libraryPollTimer = Timer.publish(every: 5, on: .main, in: .common)
+                .autoconnect()
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        await self?.reloadLibrary()
+                    }
+                }
+        } else {
+            libraryPollTimer?.cancel()
+            libraryPollTimer = nil
+        }
     }
 
     /// Open an episode from the library — fetch transcript (cache hit) and
     /// load the player at the saved position.
     func openFromLibrary(_ item: LibraryItem) async {
+        // Article-derived rows aren't playable until the TTS worker
+        // finishes; `audioUrl` is a synthetic `cue-tts://pending/<uuid>`
+        // string that AVPlayer can't resolve. Bail out silently — the
+        // library card already surfaces the processing/failed state, and
+        // the row is no-tap by construction (see LibraryView).
+        guard item.episode.status == .ready else {
+            print("[Cue] openFromLibrary skipped — episode \(item.episode.id) status=\(item.episode.status.rawValue)")
+            return
+        }
         let api = CueAPI.shared
         do {
             // Get the cached transcript (or transcribe on the fly if somehow missing).
