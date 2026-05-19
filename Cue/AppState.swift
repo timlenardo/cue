@@ -1082,7 +1082,8 @@ final class AppState {
             title: item.episode.showTitle,
             author: item.episode.showAuthor,
             feedUrl: item.episode.showFeedUrl ?? "",
-            artworkUrl: item.episode.showArtworkUrl
+            artworkUrl: item.episode.showArtworkUrl,
+            spotifyShowId: item.episode.spotifyShowId
         )
         let episode = ResolvedEpisode(
             title: item.episode.episodeTitle,
@@ -1091,7 +1092,9 @@ final class AppState {
             pubDate: item.episode.episodePubDate,
             guid: item.episode.episodeGuid ?? "",
             description: item.episode.episodeDescription,
-            artworkUrl: item.episode.episodeArtworkUrl ?? item.episode.showArtworkUrl
+            artworkUrl: item.episode.episodeArtworkUrl ?? item.episode.showArtworkUrl,
+            spotifyEpisodeId: item.episode.spotifyEpisodeId,
+            spotifyShowId: item.episode.spotifyShowId
         )
         loadLive(
             LiveEpisode(
