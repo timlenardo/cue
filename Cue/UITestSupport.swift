@@ -78,7 +78,8 @@ enum SampleLiveEpisodeFactory {
             title: "Deep Field",
             author: nil,
             feedUrl: "ui-test://deep-field",
-            artworkUrl: nil
+            artworkUrl: nil,
+            spotifyShowId: nil
         )
         let episode = ResolvedEpisode(
             title: "Galaxies that shouldn't exist",
@@ -87,7 +88,9 @@ enum SampleLiveEpisodeFactory {
             pubDate: nil,
             guid: "ui-test-sample",
             description: nil,
-            artworkUrl: nil
+            artworkUrl: nil,
+            spotifyEpisodeId: nil,
+            spotifyShowId: nil
         )
         return LiveEpisode(show: show, episode: episode, transcript: transcript)
     }

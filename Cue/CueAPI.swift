@@ -64,6 +64,7 @@ struct ResolvedShow: Codable {
     let author: String?
     let feedUrl: String
     let artworkUrl: String?
+    let spotifyShowId: String?
 }
 
 struct ResolvedEpisode: Codable {
@@ -77,6 +78,8 @@ struct ResolvedEpisode: Codable {
     /// artwork when no per-episode image is available, so this can be used
     /// directly by Library cards and the mini-player.
     let artworkUrl: String?
+    let spotifyEpisodeId: String?
+    let spotifyShowId: String?
 }
 
 struct ResolvedPodcast: Codable {
@@ -158,11 +161,13 @@ struct ServerEpisode: Codable, Equatable {
     let showAuthor: String?
     let showFeedUrl: String?
     let showArtworkUrl: String?
+    let spotifyShowId: String?
     let episodeTitle: String
     let episodeGuid: String?
     let episodePubDate: String?
     let episodeDescription: String?
     let episodeArtworkUrl: String?
+    let spotifyEpisodeId: String?
     let durationSeconds: Double?
     /// Server-side row lifecycle. `processing` and `failed` rows must NOT
     /// be handed to AVPlayer — `audioUrl` is a synthetic `cue-tts://…`
@@ -654,23 +659,23 @@ final class CueAPI {
     }
 
     func upsertLibrary(episode: ResolvedEpisode, show: ResolvedShow, source: String) async throws -> LibraryItem {
-        let body: [String: Any] = [
+        let rawBody: [String: Any?] = [
             "audioUrl": episode.audioUrl,
             "source": source,
             "showTitle": show.title,
-            "showAuthor": show.author as Any,
-            "showFeedUrl": show.feedUrl as Any,
-            "showArtworkUrl": show.artworkUrl as Any,
+            "showAuthor": show.author,
+            "showFeedUrl": show.feedUrl,
+            "showArtworkUrl": show.artworkUrl,
+            "spotifyShowId": episode.spotifyShowId ?? show.spotifyShowId,
             "episodeTitle": episode.title,
             "episodeGuid": episode.guid,
-            "episodePubDate": episode.pubDate as Any,
-            "episodeDescription": episode.description as Any,
-            "episodeArtworkUrl": episode.artworkUrl as Any,
-            "durationSeconds": episode.durationSeconds as Any,
-        ].compactMapValues { v in
-            if v is NSNull { return nil }
-            return v
-        }
+            "episodePubDate": episode.pubDate,
+            "episodeDescription": episode.description,
+            "episodeArtworkUrl": episode.artworkUrl,
+            "spotifyEpisodeId": episode.spotifyEpisodeId,
+            "durationSeconds": episode.durationSeconds,
+        ]
+        let body = rawBody.compactMapValues { $0 }
         return try await postRaw("/v1/library", body: body)
     }
 
