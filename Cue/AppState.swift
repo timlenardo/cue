@@ -64,10 +64,22 @@ enum LoadPhase: Equatable {
     case error(String)
 }
 
+struct TranscriptIndexingProgress: Equatable {
+    let stage: String
+    let completedCount: Int
+    let chunkCount: Int?
+
+    var fraction: Double? {
+        guard let chunkCount, chunkCount > 0 else { return nil }
+        return min(1, max(0, Double(completedCount) / Double(chunkCount)))
+    }
+}
+
 struct LiveEpisode {
     let show: ResolvedShow
     let episode: ResolvedEpisode
     let transcript: TranscribeResponse
+    let transcriptReadyForVoice: Bool
     /// Server-side episode id (from /v1/library upsert response). Used to
     /// scope progress PATCHes. Nil if the live playback isn't yet linked to
     /// a library item (e.g. mid-pipeline before upsert finishes).
@@ -84,10 +96,17 @@ struct LiveEpisode {
     /// chapter label always has something to display.
     let liveChapters: [Chapter]
 
-    init(show: ResolvedShow, episode: ResolvedEpisode, transcript: TranscribeResponse, serverEpisodeId: Int? = nil) {
+    init(
+        show: ResolvedShow,
+        episode: ResolvedEpisode,
+        transcript: TranscribeResponse,
+        serverEpisodeId: Int? = nil,
+        transcriptReadyForVoice: Bool = true
+    ) {
         self.show = show
         self.episode = episode
         self.transcript = transcript
+        self.transcriptReadyForVoice = transcriptReadyForVoice
         self.serverEpisodeId = serverEpisodeId
 
         let words = Self.buildWords(from: transcript)
@@ -354,11 +373,30 @@ final class AppState {
     /// forwards it to the Live Activity glow channel. Throttling /
     /// delta-gating happens inside `LiveActivityController.pushGlow`.
     @ObservationIgnored private var liveActivityGlowTimer: Timer?
+    @ObservationIgnored private var transcriptIndexingTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var lastSyncedPosition: Double = -1
     @ObservationIgnored private var lastSyncAt: Date?
 
+    var liveTranscriptIndexingProgress: TranscriptIndexingProgress?
     var palette: Palette { paletteName.palette }
     var speed: Double { Speeds.values[speedIdx] }
+    var liveTranscriptReady: Bool {
+        guard let live else { return false }
+        return live.transcriptReadyForVoice
+    }
+    var liveTranscriptIndexingActive: Bool {
+        guard live != nil else { return false }
+        return !liveTranscriptReady
+    }
+    var liveTranscriptIndexedThrough: Double? {
+        if let lastSentence = live?.liveSentences.last { return lastSentence.end }
+        return live?.liveWords.last?.end
+    }
+    var playbackIsAheadOfIndexedTranscript: Bool {
+        guard liveTranscriptIndexingActive else { return false }
+        guard let indexedThrough = liveTranscriptIndexedThrough else { return false }
+        return currentTime > indexedThrough + 1.5
+    }
 
     /// Effective duration — AVPlayer's duration when live, else the canned sample transcript.
     var totalDuration: Double {
@@ -604,7 +642,7 @@ final class AppState {
         // toggle controls toast surfacing only — it does not force-arm
         // the engine, because firing wake without a loaded episode opens
         // an empty voice agent that the user has no context for.
-        let shouldRunMic = live != nil
+        let shouldRunMic = live != nil && liveTranscriptReady
         let shouldArmWake = shouldRunMic && !voiceOpen && !wakePaused
 
         if shouldRunMic != micArmedForWake {
@@ -705,6 +743,19 @@ final class AppState {
     }
 
     func openVoiceAgent(source: VoiceEntrySource = .micButton) {
+        if let live, !live.transcriptReadyForVoice {
+            Analytics.shared.track(
+                "voice_session_blocked",
+                properties: [
+                    "reason": "transcript_pending",
+                    "entry": source.rawValue,
+                    "episode_id": live.serverEpisodeId,
+                    "position_seconds": currentTime,
+                ]
+            )
+            return
+        }
+
         // Stamp the entry so closeVoiceAgent's PostHog event can break the
         // session down by wake-word vs mic-tap.
         voiceSessionStartedAt = Date()
@@ -1004,8 +1055,9 @@ final class AppState {
         }
     }
 
-    /// Open an episode from the library — fetch transcript (cache hit) and
-    /// load the player at the saved position.
+    /// Open an episode from the library immediately. Transcript indexing is a
+    /// background concern; the player can render an indexing state until the
+    /// cached or partial transcript arrives.
     func openFromLibrary(_ item: LibraryItem) async {
         // Article-derived rows aren't playable until the TTS worker
         // finishes; `audioUrl` is a synthetic `cue-tts://pending/<uuid>`
@@ -1016,49 +1068,191 @@ final class AppState {
             print("[Cue] openFromLibrary skipped — episode \(item.episode.id) status=\(item.episode.status.rawValue)")
             return
         }
-        let api = CueAPI.shared
-        do {
-            // Get the cached transcript (or transcribe on the fly if somehow missing).
-            // Library entries always have a corresponding transcript in cache
-            // because they were added on transcribe success.
-            var transcript: TranscribeResponse?
-            for try await event in api.transcribePodcastStream(
-                audioUrl: item.episode.audioUrl,
-                durationSeconds: item.episode.durationSeconds
-            ) {
-                if case .result(let r) = event { transcript = r }
-                if case .error(let m) = event {
-                    print("[Cue] open from library error: \(m)")
-                    return
-                }
-            }
-            guard let transcript else { return }
 
-            // Reconstruct the resolved-podcast model the player expects.
-            let show = ResolvedShow(
-                title: item.episode.showTitle,
-                author: item.episode.showAuthor,
-                feedUrl: item.episode.showFeedUrl ?? "",
-                artworkUrl: item.episode.showArtworkUrl
-            )
-            let episode = ResolvedEpisode(
-                title: item.episode.episodeTitle,
-                audioUrl: item.episode.audioUrl,
-                durationSeconds: item.episode.durationSeconds,
-                pubDate: item.episode.episodePubDate,
-                guid: item.episode.episodeGuid ?? "",
-                description: item.episode.episodeDescription,
-                artworkUrl: item.episode.episodeArtworkUrl ?? item.episode.showArtworkUrl
-            )
-            loadLive(
-                LiveEpisode(show: show, episode: episode, transcript: transcript, serverEpisodeId: item.episode.id),
-                resumeAt: item.positionSeconds
-            )
-            // Refresh order so the just-opened episode jumps to the top.
-            await reloadLibrary()
-        } catch {
-            print("[Cue] open from library: \(error)")
+        if isLive(episodeId: item.episode.id) {
+            openPlayer()
+            if !audio.isPlaying {
+                audio.play()
+                audio.setRate(Float(speed))
+            }
+            return
         }
+
+        let show = ResolvedShow(
+            title: item.episode.showTitle,
+            author: item.episode.showAuthor,
+            feedUrl: item.episode.showFeedUrl ?? "",
+            artworkUrl: item.episode.showArtworkUrl
+        )
+        let episode = ResolvedEpisode(
+            title: item.episode.episodeTitle,
+            audioUrl: item.episode.audioUrl,
+            durationSeconds: item.episode.durationSeconds,
+            pubDate: item.episode.episodePubDate,
+            guid: item.episode.episodeGuid ?? "",
+            description: item.episode.episodeDescription,
+            artworkUrl: item.episode.episodeArtworkUrl ?? item.episode.showArtworkUrl
+        )
+        loadLive(
+            LiveEpisode(
+                show: show,
+                episode: episode,
+                transcript: Self.emptyTranscript(durationSeconds: item.episode.durationSeconds),
+                serverEpisodeId: item.episode.id,
+                transcriptReadyForVoice: false
+            ),
+            resumeAt: item.positionSeconds
+        )
+        startTranscriptIndexing(
+            audioUrl: item.episode.audioUrl,
+            durationSeconds: item.episode.durationSeconds
+        )
+        Task { await reloadLibrary() }
+    }
+
+    func startTranscriptIndexing(audioUrl: String, durationSeconds: Double?) {
+        if transcriptIndexingTasks[audioUrl] != nil { return }
+
+        updateTranscriptIndexingProgress(
+            audioUrl: audioUrl,
+            progress: TranscriptIndexingProgress(stage: "starting", completedCount: 0, chunkCount: nil)
+        )
+
+        let startedAt = Date()
+        Analytics.shared.track(
+            "podcast_transcribe_started",
+            properties: ["audio_duration_s": durationSeconds]
+        )
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.transcriptIndexingTasks[audioUrl] = nil }
+
+            var partialChunks: [Int: TranscribeChunkResult] = [:]
+            do {
+                var finalTranscript: TranscribeResponse?
+                for try await event in CueAPI.shared.transcribePodcastStream(
+                    audioUrl: audioUrl,
+                    durationSeconds: durationSeconds
+                ) {
+                    switch event {
+                    case .status(let stage, let chunkCount, _, _):
+                        let completed = self.liveTranscriptIndexingProgress?.completedCount ?? 0
+                        self.updateTranscriptIndexingProgress(
+                            audioUrl: audioUrl,
+                            progress: TranscriptIndexingProgress(
+                                stage: stage,
+                                completedCount: completed,
+                                chunkCount: chunkCount ?? self.liveTranscriptIndexingProgress?.chunkCount
+                            )
+                        )
+                    case .chunkResult(let chunk):
+                        partialChunks[chunk.chunkIndex] = chunk
+                        self.updateTranscriptIndexingProgress(
+                            audioUrl: audioUrl,
+                            progress: TranscriptIndexingProgress(
+                                stage: "transcribing",
+                                completedCount: chunk.completedCount,
+                                chunkCount: chunk.chunkCount
+                            )
+                        )
+                        let partial = Self.partialTranscript(
+                            from: partialChunks,
+                            durationSeconds: durationSeconds
+                        )
+                        self.replaceLiveTranscript(
+                            partial,
+                            audioUrl: audioUrl,
+                            transcriptReadyForVoice: false
+                        )
+                    case .result(let transcript):
+                        finalTranscript = transcript
+                        self.replaceLiveTranscript(
+                            transcript,
+                            audioUrl: audioUrl,
+                            transcriptReadyForVoice: true
+                        )
+                    case .error(let message):
+                        throw CueAPIError.server(status: 0, message: message)
+                    case .chunkDone, .heartbeat:
+                        break
+                    }
+                }
+
+                guard let finalTranscript else {
+                    throw CueAPIError.server(status: 0, message: "Transcription ended without a result.")
+                }
+                Analytics.shared.track(
+                    "podcast_transcribe_completed",
+                    properties: [
+                        "ok": true,
+                        "ms": Int(Date().timeIntervalSince(startedAt) * 1000),
+                        "cached": finalTranscript.cached,
+                        "segment_count": finalTranscript.segments.count,
+                    ]
+                )
+                await self.reloadLibrary()
+            } catch {
+                self.updateTranscriptIndexingProgress(
+                    audioUrl: audioUrl,
+                    progress: TranscriptIndexingProgress(
+                        stage: "failed",
+                        completedCount: self.liveTranscriptIndexingProgress?.completedCount ?? 0,
+                        chunkCount: self.liveTranscriptIndexingProgress?.chunkCount
+                    )
+                )
+                Analytics.shared.track(
+                    "podcast_transcribe_completed",
+                    properties: [
+                        "ok": false,
+                        "ms": Int(Date().timeIntervalSince(startedAt) * 1000),
+                        "error_message": error.localizedDescription,
+                    ]
+                )
+                print("[Cue] transcript indexing failed: \(error)")
+            }
+        }
+        transcriptIndexingTasks[audioUrl] = task
+    }
+
+    private func updateTranscriptIndexingProgress(
+        audioUrl: String,
+        progress: TranscriptIndexingProgress?
+    ) {
+        guard live?.episode.audioUrl == audioUrl else { return }
+        liveTranscriptIndexingProgress = progress
+    }
+
+    static func emptyTranscript(durationSeconds: Double?) -> TranscribeResponse {
+        TranscribeResponse(
+            provider: "openai",
+            text: "",
+            words: [],
+            segments: [],
+            cached: false,
+            durationSeconds: durationSeconds
+        )
+    }
+
+    private static func partialTranscript(
+        from chunks: [Int: TranscribeChunkResult],
+        durationSeconds: Double?
+    ) -> TranscribeResponse {
+        var ordered: [TranscribeChunkResult] = []
+        var idx = 0
+        while let chunk = chunks[idx] {
+            ordered.append(chunk)
+            idx += 1
+        }
+
+        return TranscribeResponse(
+            provider: "openai",
+            text: ordered.map(\.text).filter { !$0.isEmpty }.joined(separator: " "),
+            words: ordered.flatMap(\.words),
+            segments: ordered.flatMap(\.segments),
+            cached: false,
+            durationSeconds: durationSeconds
+        )
     }
 
     func removeFromLibrary(episodeId: Int) async {
@@ -1175,6 +1369,9 @@ final class AppState {
         // sample 30 Hz pump.
         stopSimulatedTimer()
         self.live = live
+        self.liveTranscriptIndexingProgress = live.transcriptReadyForVoice
+            ? nil
+            : TranscriptIndexingProgress(stage: "starting", completedCount: 0, chunkCount: nil)
         self.currentTime = resumeAt
         self.lastSyncedPosition = -1
         self.lastNowPlayingSecond = -1
@@ -1206,6 +1403,28 @@ final class AppState {
             Task { await self.reloadNotesForLiveEpisode(episodeId: episodeId) }
         }
         openPlayer()
+    }
+
+    /// Hydrate the currently-loaded episode with newer transcript data
+    /// without touching the AVPlayer. Used by onboarding while transcription
+    /// streams in behind already-started playback.
+    func replaceLiveTranscript(
+        _ transcript: TranscribeResponse,
+        audioUrl: String,
+        transcriptReadyForVoice: Bool = true
+    ) {
+        guard let current = live, current.episode.audioUrl == audioUrl else { return }
+        live = LiveEpisode(
+            show: current.show,
+            episode: current.episode,
+            transcript: transcript,
+            serverEpisodeId: current.serverEpisodeId,
+            transcriptReadyForVoice: transcriptReadyForVoice
+        )
+        if transcriptReadyForVoice {
+            liveTranscriptIndexingProgress = nil
+        }
+        updateWakeArmed()
     }
 
     func minimizePlayerAndSync() {
@@ -1284,4 +1503,3 @@ final class AppState {
         return current
     }
 }
-

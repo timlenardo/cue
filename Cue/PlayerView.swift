@@ -216,14 +216,16 @@ private struct TranscriptScrollView: View {
         return ans
     }
 
-    var activeSentenceIdx: Int {
+    var activeSentenceIdx: Int? {
+        if state.playbackIsAheadOfIndexedTranscript { return nil }
         let t = state.currentTime
         let sentences = state.transcriptSentences
         let i = Self.lastIndex(of: sentences, where: { $0.start }, leq: t)
-        return i >= 0 ? sentences[i].id : 0
+        return i >= 0 ? sentences[i].id : sentences.first?.id
     }
 
     var activeWordGlobalIdx: Int {
+        if state.playbackIsAheadOfIndexedTranscript { return -1 }
         let t = state.currentTime
         let words = state.transcriptWords
         let i = Self.lastIndex(of: words, where: { $0.start }, leq: t)
@@ -260,34 +262,40 @@ private struct TranscriptScrollView: View {
         let activeIdx = activeSentenceIdx
         let activeWordIdx = activeWordGlobalIdx
         let sentences = state.transcriptSentences
+        let followTargetId = activeIdx ?? sentences.last?.id
         let notesById = notesBySentenceId(sentences)
+        let showTranscribingPill = state.liveTranscriptIndexingActive
+            && ((state.liveTranscriptIndexingProgress?.fraction ?? 0) < 1)
 
         ZStack(alignment: .top) {
             ScrollView(showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 22) {
-                    ForEach(sentences) { sentence in
-                        SentenceBlock(
-                            sentence: sentence,
-                            isActive: sentence.id == activeIdx,
-                            isPast: sentence.id < activeIdx,
-                            activeWordIdx: activeWordIdx,
-                            notes: notesById[sentence.id] ?? []
-                        )
-                        .padding(.horizontal, 24)
-                        .id(sentence.id)
-                        .accessibilityIdentifier("transcriptSentence_\(sentence.id)")
-                    }
+                    if !sentences.isEmpty {
+                        ForEach(sentences) { sentence in
+                            SentenceBlock(
+                                sentence: sentence,
+                                isActive: sentence.id == activeIdx,
+                                isPast: sentence.end < state.currentTime,
+                                activeWordIdx: activeWordIdx,
+                                notes: notesById[sentence.id] ?? []
+                            )
+                            .padding(.horizontal, 24)
+                            .id(sentence.id)
+                            .accessibilityIdentifier("transcriptSentence_\(sentence.id)")
+                        }
 
-                    // Continuation hint.
-                    Text("Transcript continues live")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .tracking(1.2)
-                        .foregroundStyle(Ambient.textPast.opacity(0.7))
-                        .textCase(.uppercase)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 14)
-                        .padding(.top, 18)
+                        if !state.liveTranscriptIndexingActive {
+                            Text("Transcript continues live")
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .tracking(1.2)
+                                .foregroundStyle(Ambient.textPast.opacity(0.7))
+                                .textCase(.uppercase)
+                                .frame(maxWidth: .infinity)
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 14)
+                                .padding(.top, 18)
+                        }
+                    }
                 }
                 .padding(.top, 4)
                 .padding(.bottom, 320)
@@ -313,42 +321,93 @@ private struct TranscriptScrollView: View {
             }
             .onChange(of: activeIdx) { _, newIdx in
                 guard followsActive else { return }
+                guard let newIdx else { return }
                 withAnimation(.easeInOut(duration: 0.35)) {
                     scrollTopId = newIdx
                 }
             }
             .onAppear {
-                scrollTopId = activeIdx
+                scrollTopId = followTargetId
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     didInitialScroll = true
                 }
             }
 
-            if !followsActive {
-                Button {
-                    followsActive = true
-                    withAnimation(.easeInOut(duration: 0.35)) {
-                        scrollTopId = activeIdx
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("Return to playing")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(Ambient.bg)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(Capsule().fill(Ambient.accent))
-                    .shadow(color: Ambient.accentGlow.opacity(0.35), radius: 14)
+            VStack(spacing: 8) {
+                if showTranscribingPill {
+                    TranscriptIndexingStatus(
+                        progress: state.liveTranscriptIndexingProgress
+                    )
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 12)
-                .transition(.move(edge: .top).combined(with: .opacity))
+
+                if !followsActive, let followTargetId {
+                    Button {
+                        followsActive = true
+                        withAnimation(.easeInOut(duration: 0.35)) {
+                            scrollTopId = followTargetId
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Return to playing")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(Ambient.bg)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(Ambient.accent))
+                        .shadow(color: Ambient.accentGlow.opacity(0.35), radius: 14)
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            .padding(.top, 12)
         }
         .animation(.easeOut(duration: 0.2), value: followsActive)
+        .animation(.easeOut(duration: 0.2), value: state.liveTranscriptIndexingActive)
+    }
+}
+
+private struct TranscriptIndexingStatus: View {
+    let progress: TranscriptIndexingProgress?
+
+    private var title: String {
+        if progress?.stage == "failed" { return "Transcript paused" }
+        if progress?.stage == "transcribing", let fraction = progress?.fraction {
+            return "Transcribing \(Int((fraction * 100).rounded(.down)))%"
+        }
+        return "Loading"
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let fraction = progress?.fraction {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .tint(Ambient.accent)
+                    .frame(width: 46)
+            } else {
+                ProgressView()
+                    .tint(Ambient.accent)
+                    .scaleEffect(0.72)
+                    .frame(width: 18, height: 18)
+            }
+
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Ambient.textBody)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Ambient.surface.opacity(0.92))
+                .overlay(Capsule().stroke(Ambient.surfaceEdge, lineWidth: 1))
+        )
     }
 }
 
