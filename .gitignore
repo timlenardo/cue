@@ -17,3 +17,5 @@ Pods/
 
 # Carthage
 Carthage/Build/
+
+# Whisper KWS CoreML assets are tracked via Git LFS — see .gitattributes.

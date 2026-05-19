@@ -1,0 +1,4 @@
+Cue/Resources/WhisperKWS/**/*.mlmodel filter=lfs diff=lfs merge=lfs -text
+Cue/Resources/WhisperKWS/vocab.json filter=lfs diff=lfs merge=lfs -text
+Cue/Resources/WhisperKWS/merges.txt filter=lfs diff=lfs merge=lfs -text
+Cue/Resources/WhisperKWS/**/*.bin filter=lfs diff=lfs merge=lfs -text
