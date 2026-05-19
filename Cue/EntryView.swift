@@ -106,8 +106,8 @@ struct EntryView: View {
 
     private var isLoading: Bool {
         switch state.loadPhase {
-        case .resolving, .transcribing: return true
-        case .idle, .error: return false
+        case .resolving: return true
+        case .idle, .transcribing, .error: return false
         }
     }
 
@@ -279,55 +279,10 @@ struct EntryView: View {
             guard let episode = resolved.episode else {
                 throw CueAPIError.server(status: 0, message: "That link is for a show, not a single episode. Paste an episode link.")
             }
-            state.loadPhase = .transcribing(stage: "downloading", progress: nil, chunkCount: nil)
-            let transcribeStart = Date()
-            Analytics.shared.track(
-                "podcast_transcribe_started",
-                properties: ["audio_duration_s": episode.durationSeconds]
-            )
 
-            var chunkCount: Int? = nil
-            var transcript: TranscribeResponse? = nil
-            let stream = api.transcribePodcastStream(
-                audioUrl: episode.audioUrl,
-                durationSeconds: episode.durationSeconds
-            )
-            for try await event in stream {
-                switch event {
-                case .status(let stage, let n, _, _):
-                    if let n { chunkCount = n }
-                    state.loadPhase = .transcribing(stage: stage, progress: nil, chunkCount: chunkCount)
-                case .chunkDone(let idx, let n):
-                    chunkCount = n
-                    let done = Double(idx + 1)
-                    let progress = done / Double(max(1, n))
-                    state.loadPhase = .transcribing(stage: "transcribing", progress: progress, chunkCount: n)
-                case .heartbeat:
-                    break
-                case .result(let r):
-                    transcript = r
-                case .error(let msg):
-                    throw CueAPIError.server(status: 0, message: msg)
-                }
-            }
-
-            guard let transcript else {
-                throw CueAPIError.server(status: 0, message: "Transcription ended without a result.")
-            }
-
-            Analytics.shared.track(
-                "podcast_transcribe_completed",
-                properties: [
-                    "ok": true,
-                    "ms": Int(Date().timeIntervalSince(transcribeStart) * 1000),
-                    "cached": transcript.cached,
-                    "segment_count": transcript.segments.count,
-                ]
-            )
-
-            // Add to library so the user can return without re-pasting. We do
-            // this before loadLive so the player carries a serverEpisodeId and
-            // can sync progress on the first tick.
+            // Add to library before transcription so playback can carry a
+            // serverEpisodeId and sync progress immediately. A later
+            // transcription failure should not block listening.
             var serverEpisodeId: Int? = nil
             do {
                 let item = try await api.upsertLibrary(
@@ -341,26 +296,26 @@ struct EntryView: View {
                     properties: ["episode_id": item.episode.id]
                 )
             } catch {
-                // Library save failing shouldn't block listening; we just won't
-                // sync progress for this session.
                 print("[Cue] library upsert failed: \(error)")
             }
 
-            state.loadPhase = .idle
+            state.loadPhase = .transcribing(stage: "downloading", progress: nil, chunkCount: nil)
             state.loadLive(
                 LiveEpisode(
                     show: resolved.show,
                     episode: episode,
-                    transcript: transcript,
-                    serverEpisodeId: serverEpisodeId
+                    transcript: AppState.emptyTranscript(durationSeconds: episode.durationSeconds),
+                    serverEpisodeId: serverEpisodeId,
+                    transcriptReadyForVoice: false
                 )
             )
-            // Refresh library so the just-added episode is in the list.
+            state.loadPhase = .idle
+            state.startTranscriptIndexing(
+                audioUrl: episode.audioUrl,
+                durationSeconds: episode.durationSeconds
+            )
             await state.reloadLibrary()
         } catch {
-            // Generic catch — covers resolve, transcribe, and unexpected
-            // failures. We don't try to attribute the stage; the loadPhase
-            // at the moment of throw tells us downstream.
             Analytics.shared.track(
                 "library_paste_failed",
                 properties: [

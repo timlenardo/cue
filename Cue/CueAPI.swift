@@ -139,6 +139,16 @@ struct ArticleSourceMetadata: Codable, Equatable {
     let estimatedReadingTimeMinutes: Int?
 }
 
+struct TranscribeChunkResult: Codable {
+    let chunkIndex: Int
+    let completedCount: Int
+    let chunkCount: Int
+    let offsetSeconds: Double
+    let text: String
+    let words: [TranscribeWord]
+    let segments: [TranscribeSegment]
+}
+
 /// One episode in a user's library, including the resolved metadata.
 struct ServerEpisode: Codable, Equatable {
     let id: Int
@@ -306,6 +316,8 @@ struct ReadWebpageResponse: Codable {
 enum TranscribeEvent {
     /// Server-side stage label.
     case status(stage: String, chunkCount: Int?, sizeBytes: Int?, durationSeconds: Double?)
+    /// One Whisper chunk finished with timestamp-adjusted transcript data.
+    case chunkResult(TranscribeChunkResult)
     /// One Whisper chunk finished transcribing.
     case chunkDone(index: Int, chunkCount: Int)
     /// Keep-alive while a long step is in flight. UI can ignore.
@@ -602,6 +614,8 @@ final class CueAPI {
                             switch event {
                             case .status(let stage, let n, let bytes, let dur):
                                 log.info("event #\(eventCount) status stage=\(stage, privacy: .public) chunks=\(n ?? -1) bytes=\(bytes ?? -1) dur=\(dur ?? -1)")
+                            case .chunkResult(let chunk):
+                                log.info("event #\(eventCount) chunk_result chunk=\(chunk.chunkIndex + 1)/\(chunk.chunkCount) segments=\(chunk.segments.count) words=\(chunk.words.count)")
                             case .chunkDone(let i, let n):
                                 log.info("event #\(eventCount) chunk_done \(i + 1)/\(n)")
                             case .heartbeat:
@@ -826,6 +840,14 @@ private func parseEvent(_ line: String) -> TranscribeEvent? {
             sizeBytes: obj["sizeBytes"] as? Int,
             durationSeconds: obj["durationSeconds"] as? Double
         )
+    case "chunk_result":
+        var copy = obj
+        copy.removeValue(forKey: "type")
+        guard let resultData = try? JSONSerialization.data(withJSONObject: copy) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        guard let parsed = try? decoder.decode(TranscribeChunkResult.self, from: resultData) else { return nil }
+        return .chunkResult(parsed)
     case "chunk_done":
         let idx = (obj["index"] as? Int) ?? 0
         let n = (obj["chunkCount"] as? Int) ?? 1
