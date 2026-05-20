@@ -253,11 +253,12 @@ final class AppState {
         UserDefaults.standard.set(v, forKey: wakePausedKey)
     }
 
-    /// Dev toggle: when on, swap the wake engine from the WhisperKit free-
-    /// decode + regex path (`WakeWordEngine`) to the whisper-tiny CoreML
-    /// forced-decode scorer (`WhisperKwsEngine`). Flipping this stops the
+    /// Dev toggle: when on, use the whisper-tiny CoreML forced-decode scorer
+    /// (`WhisperKwsEngine`). Turning it off falls back to the older WhisperKit
+    /// free-decode + regex path (`WakeWordEngine`). Flipping this stops the
     /// current engine, swaps in the new one, rebinds callbacks, and re-arms
-    /// if an episode was loaded. Persisted across launches.
+    /// if an episode was loaded. Defaults on for new installs and persists
+    /// across launches once changed.
     var forceDecodeWakeEnabled: Bool = AppState.loadForceDecodeWake() {
         didSet {
             guard oldValue != forceDecodeWakeEnabled else { return }
@@ -268,7 +269,10 @@ final class AppState {
 
     private static let forceDecodeWakeKey = "cue.forceDecodeWakeEnabled"
     private static func loadForceDecodeWake() -> Bool {
-        UserDefaults.standard.bool(forKey: forceDecodeWakeKey)
+        if let stored = UserDefaults.standard.object(forKey: forceDecodeWakeKey) as? Bool {
+            return stored
+        }
+        return true
     }
     private static func saveForceDecodeWake(_ v: Bool) {
         UserDefaults.standard.set(v, forKey: forceDecodeWakeKey)
@@ -362,7 +366,7 @@ final class AppState {
     @ObservationIgnored var wake: WakeEngine = AppState.makeWakeEngine()
 
     private static func makeWakeEngine() -> WakeEngine {
-        if UserDefaults.standard.bool(forKey: forceDecodeWakeKey) {
+        if loadForceDecodeWake() {
             return WhisperKwsEngine()
         }
         return WakeWordEngine()
