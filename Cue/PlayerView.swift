@@ -20,6 +20,9 @@ private enum Ambient {
 
     static let accent      = Color(hex: "A8D5BA")
     static let accentGlow  = Color(hex: "A8D5BA")
+    static let ready       = Color(hex: "32D74B")
+    static let loading     = Color(hex: "FFD166")
+    static let unavailable = Color(hex: "FF453A")
 }
 
 // MARK: - Player
@@ -842,14 +845,74 @@ private struct SecondaryRow: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
+        let mode = WakePillMode(state: state)
         // Suppress the .repeatForever animations while the voice agent
         // is open — SecondaryRow is dimmed to 0.15 opacity then, but
         // SwiftUI keeps animating the (mostly invisible) bars + halo
         // anyway because the animation engine doesn't see parent
         // opacity. Cuts wasted GPU cycles during voice mode.
-        ListeningPill(active: state.playing && !state.voiceOpen)
+        ListeningPill(
+            active: state.playing && !state.voiceOpen && mode.shouldAnimate,
+            mode: mode
+        )
             .frame(maxWidth: .infinity)
             .onTapGesture { state.openVoiceAgent() }
+    }
+}
+
+private enum WakePillMode: Equatable {
+    case ready
+    case loading
+    case unavailable
+
+    init(state: AppState) {
+        if state.liveTranscriptIndexingProgress?.stage == "failed" {
+            self = .unavailable
+            return
+        }
+
+        if case .unavailable = state.wakeReadiness {
+            self = .unavailable
+            return
+        }
+
+        if !state.liveTranscriptReady || state.wakeReadiness != .ready {
+            self = .loading
+            return
+        }
+
+        self = .ready
+    }
+
+    var shouldAnimate: Bool {
+        switch self {
+        case .ready, .loading:
+            return true
+        case .unavailable:
+            return false
+        }
+    }
+
+    var label: Text {
+        switch self {
+        case .ready:
+            return Text("Tap or say ") + Text("orbit").italic()
+        case .loading:
+            return Text("Tap to talk while wake gets ready")
+        case .unavailable:
+            return Text("Tap to talk, wake unavailable")
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .ready:
+            return Ambient.ready
+        case .loading:
+            return Ambient.loading
+        case .unavailable:
+            return Ambient.unavailable
+        }
     }
 }
 
@@ -861,30 +924,16 @@ private struct ListeningPill: View {
     /// voice agent is open the pill is dimmed to 0.15 opacity but its
     /// animations were still running.
     let active: Bool
+    let mode: WakePillMode
     @State private var pulse = false
     @State private var wave = false
 
     var body: some View {
         HStack(spacing: 12) {
-            // Animated equalizer bars.
-            HStack(alignment: .center, spacing: 3) {
-                ForEach(0..<4, id: \.self) { i in
-                    Capsule()
-                        .fill(Ambient.accent.opacity(0.8))
-                        .frame(width: 3, height: barHeight(i: i))
-                        .animation(
-                            active
-                                ? .easeInOut(duration: 1.2)
-                                    .repeatForever(autoreverses: true)
-                                    .delay(staggerDelay(i: i))
-                                : .easeOut(duration: 0.3),
-                            value: wave
-                        )
-                }
-            }
-            .frame(width: 24, height: 16)
+            icon
+                .frame(width: 24, height: 16)
 
-            (Text("Tap or say ") + Text("orbit").italic())
+            mode.label
                 .font(.system(size: 13, weight: .semibold))
                 .tracking(0.2)
                 .foregroundStyle(Ambient.textPrimary)
@@ -894,13 +943,13 @@ private struct ListeningPill: View {
         .background(
             ZStack {
                 Capsule().fill(Ambient.surface.opacity(0.55))
-                Capsule().stroke(Ambient.surfaceEdge, lineWidth: 1)
+                Capsule().stroke(mode.color.opacity(0.45), lineWidth: 1)
             }
         )
         .background(
             // Glowing orb behind the pill, offset to the top-left.
             Circle()
-                .fill(Ambient.accent)
+                .fill(mode.color)
                 .frame(width: 24, height: 24)
                 .blur(radius: pulse ? 16 : 10)
                 .scaleEffect(pulse ? 1.35 : 1.0)
@@ -928,6 +977,39 @@ private struct ListeningPill: View {
                 pulse = true
                 wave = true
             }
+        }
+        .animation(.easeInOut(duration: 0.18), value: mode)
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        switch mode {
+        case .ready:
+            // Animated equalizer bars.
+            HStack(alignment: .center, spacing: 3) {
+                ForEach(0..<4, id: \.self) { i in
+                    Capsule()
+                        .fill(mode.color.opacity(0.85))
+                        .frame(width: 3, height: barHeight(i: i))
+                        .animation(
+                            active
+                                ? .easeInOut(duration: 1.2)
+                                    .repeatForever(autoreverses: true)
+                                    .delay(staggerDelay(i: i))
+                                : .easeOut(duration: 0.3),
+                            value: wave
+                        )
+                }
+            }
+        case .loading:
+            ProgressView()
+                .controlSize(.small)
+                .tint(mode.color)
+                .scaleEffect(0.7)
+        case .unavailable:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(mode.color)
         }
     }
 

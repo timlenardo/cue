@@ -196,6 +196,10 @@ final class AppState {
     /// True while the wake-word engine is listening. Drives any UI affordance
     /// (e.g. a "listening" indicator on the mic button).
     private(set) var wakeArmed: Bool = false
+    /// User-facing readiness for the current wake engine. This is separate
+    /// from `wakeArmed`: the engine can be armed while its model is still
+    /// loading or paying Core ML's first-prediction warm-up cost.
+    private(set) var wakeReadiness: WakeReadiness = .inactive
 
     /// Settings sheet visibility, driven by the gear button in EntryView.
     var settingsOpen: Bool = false
@@ -664,8 +668,10 @@ final class AppState {
     /// toggle flip replaces the engine.
     @MainActor
     private func bindWakeCallbacks() {
+        let boundWakeID = ObjectIdentifier(wake)
         wake.onDetect = { [weak self] in
             guard let self else { return }
+            guard ObjectIdentifier(self.wake) == boundWakeID else { return }
             // Defensive: the gating in updateWakeArmed should already prevent
             // wake from listening with no episode loaded, but if an in-flight
             // inference completes after stop() (or any other edge case leaks
@@ -683,9 +689,17 @@ final class AppState {
             )
             self.openVoiceAgent(source: .wakeWord)
         }
-        wake.onTranscript = { [weak self] text, isHit, levels in
-            self?.addWakeTranscript(text, isHit: isHit, levels: levels)
+        wake.onReadinessChange = { [weak self] readiness in
+            guard let self else { return }
+            guard ObjectIdentifier(self.wake) == boundWakeID else { return }
+            self.wakeReadiness = readiness
         }
+        wake.onTranscript = { [weak self] text, isHit, levels in
+            guard let self else { return }
+            guard ObjectIdentifier(self.wake) == boundWakeID else { return }
+            self.addWakeTranscript(text, isHit: isHit, levels: levels)
+        }
+        wakeReadiness = wake.readiness
     }
 
     /// Stop the current engine, instantiate the one selected by the
@@ -815,7 +829,10 @@ final class AppState {
     }
 
     func openVoiceAgent(source: VoiceEntrySource = .micButton) {
-        if let live, !live.transcriptReadyForVoice {
+        // Wake-word entry still requires the full transcript because it can
+        // fire hands-free. Manual taps should always open the voice surface;
+        // startup can proceed with the currently available server context.
+        if let live, !live.transcriptReadyForVoice, source == .wakeWord {
             Analytics.shared.track(
                 "voice_session_blocked",
                 properties: [
