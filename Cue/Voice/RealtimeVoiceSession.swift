@@ -46,6 +46,8 @@ final class RealtimeVoiceSession: NSObject {
         let totalDurationSeconds: Double?
         let episodeTitle: String
         let showTitle: String
+        let preparedSession: VoiceSessionResponse?
+        let preparedSessionFetchMs: Int?
     }
 
     private enum StartupStage: String {
@@ -91,6 +93,17 @@ final class RealtimeVoiceSession: NSObject {
     /// Non-nil only when the server returned a traceId on session mint.
     @ObservationIgnored private var telemetry: VoiceTelemetry?
     @ObservationIgnored private(set) var traceId: String?
+    @ObservationIgnored private var startupMetrics: StartupMetrics?
+
+    private struct StartupMetrics {
+        let startedAt: Date
+        var sessionSource: String = "mint"
+        var sessionMs: Int = 0
+        var preparedSessionFetchMs: Int?
+        var peerSetupMs: Int?
+        var sdpExchangeMs: Int?
+        var attempt: Int = 1
+    }
 
     /// RTCInitializeSSL must be called exactly once per process. This
     /// static `let` enforces that without us tracking a flag.
@@ -198,6 +211,10 @@ final class RealtimeVoiceSession: NSObject {
         errorMessage = nil
         userTranscript = ""
         assistantTranscript = ""
+        startupMetrics = StartupMetrics(
+            startedAt: Date(),
+            preparedSessionFetchMs: context.preparedSessionFetchMs
+        )
         startLevelMetering()
 
         log.info("start session episode=\(context.episodeTitle, privacy: .public) pausedAt=\(context.pausedAtSeconds) maxAttempts=\(startupMaxAttempts)")
@@ -239,6 +256,7 @@ final class RealtimeVoiceSession: NSObject {
     func stop() {
         log.info("stop session")
         phase = .ended
+        startupMetrics = nil
         if let tel = telemetry {
             telemetry = nil
             traceId = nil
@@ -255,22 +273,34 @@ final class RealtimeVoiceSession: NSObject {
 
     private func runStartupAttempt(context: Context, attempt: Int) async throws {
         let resp: VoiceSessionResponse
-        let mintStarted = Date()
-        log.info("start attempt \(attempt)/\(startupMaxAttempts) mint begin")
-        do {
-            resp = try await api.requestVoiceSession(
-                audioUrl: context.audioUrl,
-                pausedAtSeconds: context.pausedAtSeconds,
-                totalDurationSeconds: context.totalDurationSeconds,
-                episodeTitle: context.episodeTitle,
-                showTitle: context.showTitle
-            )
-        } catch {
-            log.warning("start attempt \(attempt)/\(startupMaxAttempts) mint failed in \(Self.elapsedMs(since: mintStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
-            throw StartupFailure(stage: .sessionMint, underlying: error)
+        var sessionSource = "mint"
+        var sessionMs = 0
+        if attempt == 1, let prepared = context.preparedSession {
+            resp = prepared
+            sessionSource = "prefetch"
+            log.info("start attempt \(attempt)/\(startupMaxAttempts) using prefetched voice session expiresAt=\(prepared.expiresAt ?? 0) ctxChars=\(prepared.contextMessage?.count ?? 0) traceId=\(prepared.traceId ?? "<none>", privacy: .public)")
+        } else {
+            let mintStarted = Date()
+            log.info("start attempt \(attempt)/\(startupMaxAttempts) mint begin")
+            do {
+                resp = try await api.requestVoiceSession(
+                    audioUrl: context.audioUrl,
+                    pausedAtSeconds: context.pausedAtSeconds,
+                    totalDurationSeconds: context.totalDurationSeconds,
+                    episodeTitle: context.episodeTitle,
+                    showTitle: context.showTitle
+                )
+            } catch {
+                log.warning("start attempt \(attempt)/\(startupMaxAttempts) mint failed in \(Self.elapsedMs(since: mintStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
+                throw StartupFailure(stage: .sessionMint, underlying: error)
+            }
+            sessionMs = Self.elapsedMs(since: mintStarted)
         }
 
-        log.info("start attempt \(attempt)/\(startupMaxAttempts) mint ok in \(Self.elapsedMs(since: mintStarted))ms expiresAt=\(resp.expiresAt ?? 0) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(resp.traceId ?? "<none>", privacy: .public)")
+        startupMetrics?.attempt = attempt
+        startupMetrics?.sessionSource = sessionSource
+        startupMetrics?.sessionMs = sessionMs
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) \(sessionSource, privacy: .public) ok in \(sessionMs)ms expiresAt=\(resp.expiresAt ?? 0) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(resp.traceId ?? "<none>", privacy: .public)")
         self.pendingContextMessage = resp.contextMessage
         if let tid = resp.traceId {
             self.traceId = tid
@@ -287,7 +317,9 @@ final class RealtimeVoiceSession: NSObject {
             log.warning("start attempt \(attempt)/\(startupMaxAttempts) peer setup failed in \(Self.elapsedMs(since: peerStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
             throw StartupFailure(stage: .peerConnection, underlying: error)
         }
-        log.info("start attempt \(attempt)/\(startupMaxAttempts) peer setup ok in \(Self.elapsedMs(since: peerStarted))ms")
+        let peerMs = Self.elapsedMs(since: peerStarted)
+        startupMetrics?.peerSetupMs = peerMs
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) peer setup ok in \(peerMs)ms")
 
         // POC: skip `configureAudioSessionForWebRTC` — the custom
         // RTCAudioDevice replaces WebRTC's default ADM entirely, so
@@ -304,7 +336,9 @@ final class RealtimeVoiceSession: NSObject {
             log.warning("start attempt \(attempt)/\(startupMaxAttempts) SDP exchange failed in \(Self.elapsedMs(since: sdpStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
             throw StartupFailure(stage: .sdpExchange, underlying: error)
         }
-        log.info("start attempt \(attempt)/\(startupMaxAttempts) SDP exchange ok in \(Self.elapsedMs(since: sdpStarted))ms traceId=\(self.traceId ?? "<none>", privacy: .public)")
+        let sdpMs = Self.elapsedMs(since: sdpStarted)
+        startupMetrics?.sdpExchangeMs = sdpMs
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) SDP exchange ok in \(sdpMs)ms traceId=\(self.traceId ?? "<none>", privacy: .public)")
 
         // From here, RTCDataChannelDelegate.dataChannelDidChangeState
         // will flip to .listening once the channel opens and we've
@@ -501,7 +535,33 @@ final class RealtimeVoiceSession: NSObject {
         }
         pendingContextMessage = nil
         phase = .listening
+        recordReadyLatency()
         SoundEffectPlayer.shared.play(.voiceReady)
+    }
+
+    private func recordReadyLatency() {
+        guard let metrics = startupMetrics else { return }
+        startupMetrics = nil
+        let totalMs = Self.elapsedMs(since: metrics.startedAt)
+        let savedMs = metrics.sessionSource == "prefetch"
+            ? metrics.preparedSessionFetchMs
+            : nil
+        let estimatedWithoutPrefetchMs = savedMs.map { totalMs + $0 }
+        log.info("voice ready total=\(totalMs)ms source=\(metrics.sessionSource, privacy: .public) session=\(metrics.sessionMs)ms saved=\(savedMs ?? 0)ms peer=\(metrics.peerSetupMs ?? -1)ms sdp=\(metrics.sdpExchangeMs ?? -1)ms traceId=\(self.traceId ?? "<none>", privacy: .public)")
+        Analytics.shared.track(
+            "voice_session_ready",
+            properties: [
+                "trace_id": traceId,
+                "startup_source": metrics.sessionSource,
+                "attempt": metrics.attempt,
+                "total_ms": totalMs,
+                "session_ms": metrics.sessionMs,
+                "prefetch_saved_ms": savedMs,
+                "estimated_without_prefetch_ms": estimatedWithoutPrefetchMs,
+                "peer_setup_ms": metrics.peerSetupMs,
+                "sdp_exchange_ms": metrics.sdpExchangeMs,
+            ]
+        )
     }
 
     private func handleDataChannelMessage(_ data: Data) {

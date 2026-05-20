@@ -27,6 +27,7 @@ final class WakeWordEngine: WakeEngine, @unchecked Sendable {
     /// Fires whenever the wake phrase is recognised (already on @MainActor).
     /// Debounced by `Debounce` seconds.
     var onDetect: (@MainActor () -> Void)?
+    var onReadinessChange: (@MainActor (_ readiness: WakeReadiness) -> Void)?
 
     /// Fires for every non-empty Whisper transcript, regardless of trigger
     /// match. Used by the dev "wake word tracking" toggle to surface what
@@ -41,6 +42,7 @@ final class WakeWordEngine: WakeEngine, @unchecked Sendable {
 
     enum State { case idle, loading, listening, denied, failed(String) }
     private(set) var state: State = .idle
+    private(set) var readiness: WakeReadiness = .inactive
 
     // MARK: - Tunables
     private static let TargetSampleRate: Double = 16_000
@@ -142,6 +144,7 @@ final class WakeWordEngine: WakeEngine, @unchecked Sendable {
             self?.handle(buffer: buffer)
         }
         state = .listening
+        updateReadiness(pipeline == nil ? .warmingUp : .ready)
         log.info("whisper wake handler registered")
     }
 
@@ -158,6 +161,7 @@ final class WakeWordEngine: WakeEngine, @unchecked Sendable {
         lastInferenceAt = .distantPast
         stateLock.unlock()
         if case .listening = state { state = .idle }
+        updateReadiness(.inactive)
         log.info("whisper wake handler unregistered")
     }
 
@@ -168,6 +172,7 @@ final class WakeWordEngine: WakeEngine, @unchecked Sendable {
         guard pipeline == nil else { return }
         if case .loading = state { return }
         state = .loading
+        updateReadiness(.warmingUp)
         log.info("whisper loading model: \(Self.ModelName, privacy: .public)")
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
@@ -178,8 +183,10 @@ final class WakeWordEngine: WakeEngine, @unchecked Sendable {
                     self.pipeline = pipe
                     if self.bufferToken != nil {
                         self.state = .listening
+                        self.updateReadiness(.ready)
                     } else {
                         self.state = .idle
+                        self.updateReadiness(.inactive)
                     }
                     self.log.info("whisper model ready")
                 }
@@ -187,10 +194,18 @@ final class WakeWordEngine: WakeEngine, @unchecked Sendable {
                 let msg = error.localizedDescription
                 await MainActor.run {
                     self?.state = .failed(msg)
+                    self?.updateReadiness(.unavailable(msg))
                     self?.log.error("whisper model load failed: \(msg, privacy: .public)")
                 }
             }
         }
+    }
+
+    @MainActor
+    private func updateReadiness(_ next: WakeReadiness) {
+        guard readiness != next else { return }
+        readiness = next
+        onReadinessChange?(next)
     }
 
     // MARK: - Audio path (audio render thread)

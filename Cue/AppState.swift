@@ -172,6 +172,40 @@ enum VoiceEntrySource: String {
     case micButton = "mic_button"
 }
 
+private struct VoiceSessionPrefetchRequest: Equatable {
+    let audioUrl: String
+    let pausedAtSeconds: Double
+    let totalDurationSeconds: Double?
+    let episodeTitle: String
+    let showTitle: String
+
+    init(live: LiveEpisode, pausedAtSeconds: Double, totalDurationSeconds: Double?) {
+        self.audioUrl = live.episode.audioUrl
+        self.pausedAtSeconds = pausedAtSeconds
+        self.totalDurationSeconds = totalDurationSeconds
+        self.episodeTitle = live.episode.title
+        self.showTitle = live.show.title
+    }
+
+    func sameEpisode(as other: VoiceSessionPrefetchRequest) -> Bool {
+        audioUrl == other.audioUrl &&
+        episodeTitle == other.episodeTitle &&
+        showTitle == other.showTitle
+    }
+}
+
+private struct VoiceSessionPrefetch {
+    let request: VoiceSessionPrefetchRequest
+    let response: VoiceSessionResponse
+    let fetchedAt: Date
+    let fetchMs: Int
+}
+
+private struct ConsumedVoiceSessionPrefetch {
+    let response: VoiceSessionResponse
+    let fetchMs: Int
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -201,6 +235,10 @@ final class AppState {
     /// True while the wake-word engine is listening. Drives any UI affordance
     /// (e.g. a "listening" indicator on the mic button).
     private(set) var wakeArmed: Bool = false
+    /// User-facing readiness for the current wake engine. This is separate
+    /// from `wakeArmed`: the engine can be armed while its model is still
+    /// loading or paying Core ML's first-prediction warm-up cost.
+    private(set) var wakeReadiness: WakeReadiness = .inactive
 
     /// Settings sheet visibility, driven by the gear button in EntryView.
     var settingsOpen: Bool = false
@@ -382,6 +420,10 @@ final class AppState {
     /// a session against).
     var voiceSession: RealtimeVoiceSession?
 
+    @ObservationIgnored private var prefetchedVoiceSession: VoiceSessionPrefetch?
+    @ObservationIgnored private var voiceSessionPrefetchTask: Task<Void, Never>?
+    @ObservationIgnored private var voiceSessionPrefetchRefreshTask: Task<Void, Never>?
+
     @ObservationIgnored let audio = AudioPlayer()
     /// Effective wake engine currently installed. This follows the persisted
     /// `forceDecodeWakeEnabled` preference only while the app is active; the
@@ -439,6 +481,11 @@ final class AppState {
     @ObservationIgnored private var transcriptIndexingTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var lastSyncedPosition: Double = -1
     @ObservationIgnored private var lastSyncAt: Date?
+
+    private static let voiceSessionPrefetchExpiryLeadSeconds: TimeInterval = 12
+    private static let voiceSessionPrefetchMaxPositionSkewSeconds: TimeInterval = 45
+    private static let voiceSessionPrefetchRetryDelaySeconds: TimeInterval = 10
+    private static let voiceSessionPrefetchMinimumRefreshDelaySeconds: TimeInterval = 5
 
     var liveTranscriptIndexingProgress: TranscriptIndexingProgress?
     var palette: Palette { paletteName.palette }
@@ -574,6 +621,7 @@ final class AppState {
                 // isPlaying flips true after that, we treat as "started".
                 if self.live != nil {
                     if p {
+                        self.startVoiceSessionPrefetch(reason: "playback_started")
                         let event = self.firstPlayFiredForLive
                             ? "playback_resumed"
                             : "playback_started"
@@ -642,10 +690,12 @@ final class AppState {
         reconcileWakeEngineForCurrentState()
         if !active {
             stopLiveActivityGlowSampler()
+            cancelVoiceSessionPrefetchWork(clearCache: false)
         } else {
             if voiceOpen, voiceSession != nil {
                 startLiveActivityGlowSampler()
             }
+            startVoiceSessionPrefetch(reason: "foreground")
             // Per the article-TTS brief: refetch the library once on
             // foreground when any row is still processing — picks up the
             // ready/failed flip the user missed while backgrounded.
@@ -700,9 +750,11 @@ final class AppState {
     private func bindWakeCallbacks() {
         wakeCallbackGeneration += 1
         let generation = wakeCallbackGeneration
+        let boundWakeID = ObjectIdentifier(wake)
         wake.onDetect = { [weak self] in
             guard let self else { return }
             guard generation == self.wakeCallbackGeneration else { return }
+            guard ObjectIdentifier(self.wake) == boundWakeID else { return }
             // Defensive: the gating in updateWakeArmed should already prevent
             // wake from listening with no episode loaded, but if an in-flight
             // inference completes after stop() (or any other edge case leaks
@@ -724,11 +776,19 @@ final class AppState {
             )
             self.openVoiceAgent(source: .wakeWord)
         }
+        wake.onReadinessChange = { [weak self] readiness in
+            guard let self else { return }
+            guard generation == self.wakeCallbackGeneration else { return }
+            guard ObjectIdentifier(self.wake) == boundWakeID else { return }
+            self.wakeReadiness = readiness
+        }
         wake.onTranscript = { [weak self] text, isHit, levels in
             guard let self else { return }
             guard generation == self.wakeCallbackGeneration, self.wakeArmed else { return }
+            guard ObjectIdentifier(self.wake) == boundWakeID else { return }
             self.addWakeTranscript(text, isHit: isHit, levels: levels)
         }
+        wakeReadiness = wake.readiness
     }
 
     /// Reconcile the installed wake engine against the user's forced-decode
@@ -749,6 +809,7 @@ final class AppState {
     private func swapWakeEngine(to kind: WakeEngineKind) {
         let wasArmed = wakeArmed
         wake.onDetect = nil
+        wake.onReadinessChange = nil
         wake.onTranscript = nil
         wake.stop()
         wakeArmed = false
@@ -796,6 +857,14 @@ final class AppState {
             } else {
                 wake.stop()
             }
+        }
+
+        if shouldRunMic && !voiceOpen {
+            startVoiceSessionPrefetch(reason: "wake_armed")
+        } else if live == nil || !liveTranscriptReady {
+            cancelVoiceSessionPrefetchWork(clearCache: true)
+        } else if voiceOpen {
+            cancelVoiceSessionPrefetchWork(clearCache: false)
         }
     }
 
@@ -848,13 +917,21 @@ final class AppState {
     }
 
     func skipBack15() {
-        if live != nil { audio.seek(to: max(0, audio.currentTime - 15)) }
-        else { currentTime = max(0, currentTime - 15) }
+        if live != nil {
+            audio.seek(to: max(0, audio.currentTime - 15))
+            invalidateVoiceSessionPrefetchForPositionChange(reason: "skip_back")
+        } else {
+            currentTime = max(0, currentTime - 15)
+        }
     }
 
     func skipFwd15() {
-        if live != nil { audio.seek(to: min(totalDuration, audio.currentTime + 15)) }
-        else { currentTime = min(totalDuration, currentTime + 15) }
+        if live != nil {
+            audio.seek(to: min(totalDuration, audio.currentTime + 15))
+            invalidateVoiceSessionPrefetchForPositionChange(reason: "skip_forward")
+        } else {
+            currentTime = min(totalDuration, currentTime + 15)
+        }
     }
 
     func cycleSpeed() {
@@ -865,14 +942,232 @@ final class AppState {
     func openPlayer() {
         withAnimation(.easeOut(duration: 0.28)) { playerOpen = true }
         updateWakeArmed()
+        startVoiceSessionPrefetch(reason: "player_open")
     }
     func minimizePlayer() {
         withAnimation(.easeOut(duration: 0.28)) { playerOpen = false }
         updateWakeArmed()
     }
 
+    // MARK: - Voice session prefetch
+
+    private func currentVoiceSessionPrefetchRequest() -> VoiceSessionPrefetchRequest? {
+        guard scenePhaseActive,
+              !voiceOpen,
+              let live,
+              live.transcriptReadyForVoice,
+              let pausedAt = currentPausedSeconds()
+        else { return nil }
+
+        return VoiceSessionPrefetchRequest(
+            live: live,
+            pausedAtSeconds: pausedAt,
+            totalDurationSeconds: totalDuration > 0 ? totalDuration : nil
+        )
+    }
+
+    private func startVoiceSessionPrefetch(reason: String) {
+        guard let request = currentVoiceSessionPrefetchRequest() else {
+            cancelVoiceSessionPrefetchWork(clearCache: false)
+            return
+        }
+
+        let now = Date()
+        if let cached = prefetchedVoiceSession,
+           voiceSessionPrefetch(cached, isUsableFor: request, now: now) {
+            scheduleVoiceSessionPrefetchRefresh()
+            return
+        }
+
+        guard voiceSessionPrefetchTask == nil else { return }
+
+        voiceSessionPrefetchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let started = Date()
+            defer { self.voiceSessionPrefetchTask = nil }
+
+            do {
+                let response = try await CueAPI.shared.requestVoiceSession(
+                    audioUrl: request.audioUrl,
+                    pausedAtSeconds: request.pausedAtSeconds,
+                    totalDurationSeconds: request.totalDurationSeconds,
+                    episodeTitle: request.episodeTitle,
+                    showTitle: request.showTitle
+                )
+                guard !Task.isCancelled else { return }
+                guard let current = self.currentVoiceSessionPrefetchRequest(),
+                      request.sameEpisode(as: current),
+                      abs(current.pausedAtSeconds - request.pausedAtSeconds) <= Self.voiceSessionPrefetchMaxPositionSkewSeconds
+                else {
+                    print("[VoicePrefetch] discard stale response reason=\(reason)")
+                    return
+                }
+                guard self.voiceSessionResponseHasReusableExpiry(response, now: Date()) else {
+                    print("[VoicePrefetch] discard response without enough expiry reason=\(reason)")
+                    self.scheduleVoiceSessionPrefetchRetry(reason: "short_expiry")
+                    return
+                }
+
+                let fetchMs = Int(Date().timeIntervalSince(started) * 1000)
+                self.prefetchedVoiceSession = VoiceSessionPrefetch(
+                    request: request,
+                    response: response,
+                    fetchedAt: Date(),
+                    fetchMs: fetchMs
+                )
+                let expiresIn = self.secondsUntilVoiceSessionExpiry(response, now: Date()) ?? 0
+                print("[VoicePrefetch] ready reason=\(reason) ms=\(fetchMs) expiresIn=\(Int(expiresIn))s")
+                Analytics.shared.track(
+                    "voice_session_prefetched",
+                    properties: [
+                        "reason": reason,
+                        "ms": fetchMs,
+                        "expires_in_s": Int(expiresIn),
+                        "trace_id": response.traceId,
+                    ]
+                )
+                self.scheduleVoiceSessionPrefetchRefresh()
+            } catch {
+                guard !Task.isCancelled else { return }
+                print("[VoicePrefetch] failed reason=\(reason): \(error)")
+                Analytics.shared.track(
+                    "voice_session_prefetch_failed",
+                    properties: [
+                        "reason": reason,
+                        "error_message": error.localizedDescription,
+                    ]
+                )
+                self.scheduleVoiceSessionPrefetchRetry(reason: "failure")
+            }
+        }
+    }
+
+    private func consumePrefetchedVoiceSession(
+        for request: VoiceSessionPrefetchRequest
+    ) -> ConsumedVoiceSessionPrefetch? {
+        guard let cached = prefetchedVoiceSession else {
+            Analytics.shared.track(
+                "voice_session_prefetch_missed",
+                properties: ["reason": "empty"]
+            )
+            return nil
+        }
+
+        guard voiceSessionPrefetch(cached, isUsableFor: request, now: Date()) else {
+            prefetchedVoiceSession = nil
+            voiceSessionPrefetchRefreshTask?.cancel()
+            voiceSessionPrefetchRefreshTask = nil
+            Analytics.shared.track(
+                "voice_session_prefetch_missed",
+                properties: ["reason": "stale"]
+            )
+            return nil
+        }
+
+        prefetchedVoiceSession = nil
+        voiceSessionPrefetchRefreshTask?.cancel()
+        voiceSessionPrefetchRefreshTask = nil
+
+        let ageMs = Int(Date().timeIntervalSince(cached.fetchedAt) * 1000)
+        let positionSkew = abs(request.pausedAtSeconds - cached.request.pausedAtSeconds)
+        let expiresIn = secondsUntilVoiceSessionExpiry(cached.response, now: Date()) ?? 0
+        print("[VoicePrefetch] consumed ageMs=\(ageMs) fetchMs=\(cached.fetchMs) positionSkew=\(String(format: "%.1f", positionSkew))s expiresIn=\(Int(expiresIn))s")
+        Analytics.shared.track(
+            "voice_session_prefetch_consumed",
+            properties: [
+                "age_ms": ageMs,
+                "fetch_ms": cached.fetchMs,
+                "position_skew_s": positionSkew,
+                "expires_in_s": Int(expiresIn),
+                "trace_id": cached.response.traceId,
+            ]
+        )
+        return ConsumedVoiceSessionPrefetch(
+            response: cached.response,
+            fetchMs: cached.fetchMs
+        )
+    }
+
+    private func voiceSessionPrefetch(
+        _ cached: VoiceSessionPrefetch,
+        isUsableFor request: VoiceSessionPrefetchRequest,
+        now: Date
+    ) -> Bool {
+        guard cached.request.sameEpisode(as: request) else { return false }
+        guard abs(request.pausedAtSeconds - cached.request.pausedAtSeconds) <= Self.voiceSessionPrefetchMaxPositionSkewSeconds else {
+            return false
+        }
+        return voiceSessionResponseHasReusableExpiry(cached.response, now: now)
+    }
+
+    private func voiceSessionResponseHasReusableExpiry(
+        _ response: VoiceSessionResponse,
+        now: Date
+    ) -> Bool {
+        guard let expiresIn = secondsUntilVoiceSessionExpiry(response, now: now) else {
+            return false
+        }
+        return expiresIn > Self.voiceSessionPrefetchExpiryLeadSeconds
+    }
+
+    private func secondsUntilVoiceSessionExpiry(
+        _ response: VoiceSessionResponse,
+        now: Date
+    ) -> TimeInterval? {
+        guard let expiresAt = response.expiresAt else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(expiresAt)).timeIntervalSince(now)
+    }
+
+    private func scheduleVoiceSessionPrefetchRefresh() {
+        voiceSessionPrefetchRefreshTask?.cancel()
+        guard let cached = prefetchedVoiceSession,
+              let expiresIn = secondsUntilVoiceSessionExpiry(cached.response, now: Date())
+        else { return }
+
+        let refreshIn = max(
+            Self.voiceSessionPrefetchMinimumRefreshDelaySeconds,
+            expiresIn - Self.voiceSessionPrefetchExpiryLeadSeconds
+        )
+        voiceSessionPrefetchRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.nanoseconds(for: refreshIn))
+            guard !Task.isCancelled else { return }
+            self?.voiceSessionPrefetchRefreshTask = nil
+            self?.startVoiceSessionPrefetch(reason: "expires_soon")
+        }
+    }
+
+    private func scheduleVoiceSessionPrefetchRetry(reason: String) {
+        voiceSessionPrefetchRefreshTask?.cancel()
+        voiceSessionPrefetchRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.nanoseconds(for: Self.voiceSessionPrefetchRetryDelaySeconds))
+            guard !Task.isCancelled else { return }
+            self?.voiceSessionPrefetchRefreshTask = nil
+            self?.startVoiceSessionPrefetch(reason: "retry_\(reason)")
+        }
+    }
+
+    private func cancelVoiceSessionPrefetchWork(clearCache: Bool) {
+        voiceSessionPrefetchTask?.cancel()
+        voiceSessionPrefetchTask = nil
+        voiceSessionPrefetchRefreshTask?.cancel()
+        voiceSessionPrefetchRefreshTask = nil
+        if clearCache { prefetchedVoiceSession = nil }
+    }
+
+    private func invalidateVoiceSessionPrefetchForPositionChange(reason: String) {
+        cancelVoiceSessionPrefetchWork(clearCache: true)
+        startVoiceSessionPrefetch(reason: reason)
+    }
+
+    private static func nanoseconds(for seconds: TimeInterval) -> UInt64 {
+        UInt64(max(0, seconds) * 1_000_000_000)
+    }
+
     func openVoiceAgent(source: VoiceEntrySource = .micButton) {
-        if let live, !live.transcriptReadyForVoice {
+        // Wake-word entry still requires the full transcript because it can
+        // fire hands-free. Manual taps should always open the voice surface;
+        // startup can proceed with the currently available server context.
+        if let live, !live.transcriptReadyForVoice, source == .wakeWord {
             Analytics.shared.track(
                 "voice_session_blocked",
                 properties: [
@@ -950,6 +1245,12 @@ final class AppState {
             voiceSession = nil
             return
         }
+        let prefetchRequest = VoiceSessionPrefetchRequest(
+            live: live,
+            pausedAtSeconds: pausedAt,
+            totalDurationSeconds: totalDuration > 0 ? totalDuration : nil
+        )
+        let preparedSession = consumePrefetchedVoiceSession(for: prefetchRequest)
         let session = RealtimeVoiceSession(api: CueAPI.shared, state: self)
         voiceSession = session
         let ctx = RealtimeVoiceSession.Context(
@@ -957,7 +1258,9 @@ final class AppState {
             pausedAtSeconds: pausedAt,
             totalDurationSeconds: totalDuration > 0 ? totalDuration : nil,
             episodeTitle: live.episode.title,
-            showTitle: live.show.title
+            showTitle: live.show.title,
+            preparedSession: preparedSession?.response,
+            preparedSessionFetchMs: preparedSession?.fetchMs
         )
         Task { await session.start(context: ctx) }
     }
@@ -1023,6 +1326,7 @@ final class AppState {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             self.updateWakeArmed()
+            self.startVoiceSessionPrefetch(reason: "voice_closed")
         }
     }
 
@@ -1117,6 +1421,7 @@ final class AppState {
         if live != nil {
             audio.seek(to: clamped)
             syncProgress(force: true)
+            invalidateVoiceSessionPrefetchForPositionChange(reason: "seek")
         } else {
             currentTime = clamped
         }
@@ -1500,6 +1805,7 @@ final class AppState {
         // AVPlayer drives `currentTime` from here on — kill the canned-
         // sample 30 Hz pump.
         stopSimulatedTimer()
+        cancelVoiceSessionPrefetchWork(clearCache: true)
         self.live = live
         self.liveTranscriptIndexingProgress = live.transcriptReadyForVoice
             ? nil
@@ -1535,6 +1841,7 @@ final class AppState {
             Task { await self.reloadNotesForLiveEpisode(episodeId: episodeId) }
         }
         openPlayer()
+        startVoiceSessionPrefetch(reason: "load_live")
     }
 
     /// Hydrate the currently-loaded episode with newer transcript data
@@ -1555,6 +1862,8 @@ final class AppState {
         )
         if transcriptReadyForVoice {
             liveTranscriptIndexingProgress = nil
+            cancelVoiceSessionPrefetchWork(clearCache: true)
+            startVoiceSessionPrefetch(reason: "transcript_ready")
         }
         updateWakeArmed()
     }
@@ -1568,6 +1877,7 @@ final class AppState {
     func endPlayback() {
         syncProgress(force: true)
         audio.unload()
+        cancelVoiceSessionPrefetchWork(clearCache: true)
         live = nil
         playing = false
         currentTime = 0

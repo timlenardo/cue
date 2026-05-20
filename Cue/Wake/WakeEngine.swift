@@ -1,6 +1,13 @@
 #if os(iOS)
 import Foundation
 
+enum WakeReadiness: Equatable, Sendable {
+    case inactive
+    case warmingUp
+    case ready
+    case unavailable(String)
+}
+
 /// Common surface for any wake-word engine. Lets `AppState` swap engines at
 /// runtime (via the dev `forceDecodeWakeEnabled` toggle) without changing
 /// any of the wiring sites — both `WakeWordEngine` (WhisperKit free-decode +
@@ -15,6 +22,15 @@ protocol WakeEngine: AnyObject {
     /// Fires when the wake phrase is recognised. Already on @MainActor.
     /// Debounced by the engine.
     var onDetect: (@MainActor () -> Void)? { get set }
+
+    /// Current user-facing readiness state for always-on wake detection.
+    /// `ready` means saying the wake phrase can fire `onDetect`; `warmingUp`
+    /// covers model/tokenizer load and Core ML first-prediction warm-up.
+    var readiness: WakeReadiness { get }
+
+    /// Fires when `readiness` changes. Used by AppState to drive the player
+    /// wake pill without coupling UI code to either concrete wake engine.
+    var onReadinessChange: (@MainActor (_ readiness: WakeReadiness) -> Void)? { get set }
 
     /// Fires per inference round, regardless of trigger match. Used by the
     /// dev "wake word tracking" toggle to surface what the engine is hearing
