@@ -22,9 +22,9 @@ import Foundation
 /// on this. Callers who need to *prevent* overflow should check
 /// `isFull` before pushing.
 struct RingBuffer<T> {
-    @usableFromInline var storage: [T]
-    @usableFromInline var head: Int = 0
-    @usableFromInline var occupancy: Int = 0
+    @usableFromInline nonisolated(unsafe) var storage: [T]
+    @usableFromInline nonisolated(unsafe) var head: Int = 0
+    @usableFromInline nonisolated(unsafe) var occupancy: Int = 0
 
     init(capacity: Int, fill: T) {
         precondition(capacity > 0, "RingBuffer capacity must be > 0")
@@ -32,7 +32,7 @@ struct RingBuffer<T> {
     }
 
     @inlinable var capacity: Int { storage.count }
-    @inlinable var count: Int { occupancy }
+    @inlinable nonisolated var count: Int { occupancy }
     @inlinable var isEmpty: Bool { occupancy == 0 }
     @inlinable var isFull: Bool { occupancy == storage.count }
 
@@ -53,7 +53,7 @@ struct RingBuffer<T> {
     /// memcpy under the hood — a scalar pushBack-per-element loop is ~3×
     /// slower than `Array.append(contentsOf:)`.
     @inlinable
-    mutating func pushBack(_ src: UnsafeBufferPointer<T>) {
+    nonisolated mutating func pushBack(_ src: UnsafeBufferPointer<T>) {
         let cap = storage.count
         let n = src.count
         if n == 0 { return }
@@ -138,7 +138,7 @@ struct RingBuffer<T> {
     /// order. Uses bulk memcpy via `Array(unsafeUninitializedCapacity:)`.
     /// Use only from non-realtime call sites (e.g., handing the wake-word
     /// window to Whisper inference).
-    func snapshot() -> [T] {
+    nonisolated func snapshot() -> [T] {
         let cap = storage.count
         let n = occupancy
         if n == 0 { return [] }

@@ -37,13 +37,30 @@ import CoreML
 import Foundation
 import os.log
 
-private let scorerLog = Logger(subsystem: "app.cue", category: "whisperKWS")
+nonisolated private let scorerLog = Logger(subsystem: "app.cue", category: "whisperKWS")
 
 /// Unchecked-Sendable wrapper for handing CoreML objects across `Task`
 /// boundaries. `MLMultiArray` and `MLModel` are documented as thread-safe
 /// for prediction; the wrapper just appeases Swift 6's strict concurrency.
 private struct UnsafeSend<T>: @unchecked Sendable {
-    let value: T
+    nonisolated(unsafe) let value: T
+}
+
+private struct WhisperKwsEncodedWindow: @unchecked Sendable {
+    nonisolated(unsafe) let encoderOutput: MLMultiArray
+    let copyMs: Double
+    let melMs: Double
+    let encoderMs: Double
+    let sliceMs: Double
+    let totalMs: Double
+}
+
+private struct WhisperKwsDecodeScores {
+    let scores: [Float]
+    let inputMs: Double
+    let predictionMs: Double
+    let postprocessMs: Double
+    let totalMs: Double
 }
 
 enum WhisperKwsScorerError: LocalizedError {
@@ -138,6 +155,7 @@ actor WhisperKwsScorer {
     /// keyword is BPE-encoded and prepended with the decoder prefix. Safe
     /// to call repeatedly — no-ops when the keyword set is unchanged.
     func loadIfNeeded(keywords: [String]) async throws {
+        let loadStarted = DispatchTime.now()
         guard !keywords.isEmpty else { return }
 
         var hasher = Hasher()
@@ -145,24 +163,33 @@ actor WhisperKwsScorer {
         let hash = hasher.finalize()
         guard loadedHash != hash else { return }
 
+        var modelTimings: [String] = []
+
         // Lazily load the three CoreML models from the bundle.
         if melModel == nil {
             // Mel on CPU — sharing ANE with the decoder causes contention
             // (ANE serializes its dispatch queue) and breaks encoder/decoder
             // pipelining. CPU mel is ~1 ms/call, well within budget.
+            let started = DispatchTime.now()
             melModel = try Self.loadModel(named: "MelSpectrogram", computeUnits: .cpuOnly)
+            modelTimings.append("mel=\(Self.ms(Self.elapsedMs(since: started)))")
         }
         if encoderModel == nil {
             // Tiny encoder on GPU (5 ms) — the 13 ms ANE path is 2.6× slower
             // for whisper-tiny because dispatch overhead dominates compute.
+            let started = DispatchTime.now()
             encoderModel = try Self.loadModel(named: "AudioEncoderTiny", computeUnits: .cpuAndGPU)
+            modelTimings.append("encoder=\(Self.ms(Self.elapsedMs(since: started)))")
         }
         if decoderModel == nil {
             // Tiny decoder on ANE (8 ms) — paired with the encoder on GPU
             // so the two stages pipeline across different devices.
+            let started = DispatchTime.now()
             decoderModel = try Self.loadModel(named: "TextDecoderParallelTiny", computeUnits: .cpuAndNeuralEngine)
+            modelTimings.append("decoder=\(Self.ms(Self.elapsedMs(since: started)))")
         }
 
+        let tokenStarted = DispatchTime.now()
         var newTokens: [(keyword: String, tokenIds: [Int])] = []
         for keyword in keywords {
             do {
@@ -187,18 +214,32 @@ actor WhisperKwsScorer {
                 )
             }
         }
+        let tokenMs = Self.elapsedMs(since: tokenStarted)
 
         self.keywordTokens = newTokens
         self.loadedHash = hash
-        scorerLog.info("WhisperKwsScorer loaded with \(newTokens.count, privacy: .public) keyword(s)")
+        let totalMs = Self.elapsedMs(since: loadStarted)
+        scorerLog.debug("kws timing load: total=\(Self.ms(totalMs), privacy: .public) models=\(modelTimings.joined(separator: " "), privacy: .public) tokenize=\(Self.ms(tokenMs), privacy: .public) keywords=\(newTokens.count, privacy: .public)")
+    }
+
+    /// Run one silent single-window inference after model load so CoreML pays
+    /// its first-prediction setup cost before the wake engine starts listening.
+    func warmUp(sampleCount: Int) async throws {
+        guard sampleCount > 0 else { return }
+        guard isLoaded else { throw WhisperKwsScorerError.notLoaded }
+        let started = DispatchTime.now()
+        _ = try await maxScores(in: Array(repeating: 0, count: sampleCount))
+        scorerLog.debug("kws timing warmup: total=\(Self.ms(Self.elapsedMs(since: started)), privacy: .public) samples=\(sampleCount, privacy: .public)")
     }
 
     /// Run the sliding-window scorer on `samples` (Float32, 16 kHz, mono).
     /// Returns per-keyword max-window scores (one entry per registered keyword).
     func maxScores(in samples: [Float]) async throws -> [WhisperKwsScore] {
+        let totalStarted = DispatchTime.now()
         guard isLoaded else { throw WhisperKwsScorerError.notLoaded }
         guard !samples.isEmpty else { return [] }
 
+        let setupStarted = DispatchTime.now()
         let windowSamples = Int(Self.windowSec * Double(Self.sampleRate))
         let strideSamples = max(1, Int(Self.strideSec * Double(Self.sampleRate)))
         let lastStart = max(0, samples.count - windowSamples)
@@ -213,6 +254,7 @@ actor WhisperKwsScorer {
         // Buffers shorter than one window: score the whole thing once,
         // zero-padded inside the mel call. Better than returning empty.
         if windowStarts.isEmpty { windowStarts = [0] }
+        let setupMs = Self.elapsedMs(since: setupStarted)
 
         guard let melModel = self.melModel,
               let encoderModel = self.encoderModel,
@@ -229,41 +271,84 @@ actor WhisperKwsScorer {
         // Pipelined per-window encode + batched decode. Encoder runs on
         // GPU (detached Task), decoder runs on ANE — different devices
         // so they parallelize.
-        func makeEncoderTask(_ start: Int) -> Task<UnsafeSend<MLMultiArray>, Error> {
+        func makeEncoderTask(_ start: Int) -> Task<WhisperKwsEncodedWindow, Error> {
+            let copyStarted = DispatchTime.now()
             let end = min(start + windowSamples, samples.count)
             let windowAudio = Array(samples[start..<end])
+            let copyMs = Self.elapsedMs(since: copyStarted)
             return Task.detached(priority: .userInitiated) {
+                let totalStarted = DispatchTime.now()
+                let melStarted = DispatchTime.now()
                 let mel = try Self.runMelSpectrogramStatic(
                     model: melSend.value,
                     samples: windowAudio,
                     audioPadSamples: audioPad
                 )
+                let melMs = Self.elapsedMs(since: melStarted)
+                let encoderStarted = DispatchTime.now()
                 let encFull = try Self.runEncoderStatic(model: encSend.value, mel: mel)
+                let encoderMs = Self.elapsedMs(since: encoderStarted)
+                let sliceStarted = DispatchTime.now()
                 let encSliced = try Self.sliceEncoderToContext(encFull, contextLen: encoderContext)
-                return UnsafeSend(value: encSliced)
+                let sliceMs = Self.elapsedMs(since: sliceStarted)
+                return WhisperKwsEncodedWindow(
+                    encoderOutput: encSliced,
+                    copyMs: copyMs,
+                    melMs: melMs,
+                    encoderMs: encoderMs,
+                    sliceMs: sliceMs,
+                    totalMs: Self.elapsedMs(since: totalStarted)
+                )
             }
         }
 
         // Tracks max score per keyword across all windows.
         var maxScoreByIdx: [Float] = Array(repeating: -.infinity, count: kwTokens.count)
+        var encoderAwaitTotalMs: Double = 0
+        var copyTotalMs: Double = 0
+        var melTotalMs: Double = 0
+        var encoderTotalMs: Double = 0
+        var sliceTotalMs: Double = 0
+        var encodeMaxMs: Double = 0
+        var decoderInputTotalMs: Double = 0
+        var decoderPredictTotalMs: Double = 0
+        var decoderPostTotalMs: Double = 0
+        var decoderTotalMs: Double = 0
+        var decoderMaxMs: Double = 0
 
-        var inFlight: Task<UnsafeSend<MLMultiArray>, Error>? = makeEncoderTask(windowStarts[0])
+        var inFlight: Task<WhisperKwsEncodedWindow, Error>? = makeEncoderTask(windowStarts[0])
         for (i, _) in windowStarts.enumerated() {
-            let enc = try await inFlight!.value.value
+            let awaitStarted = DispatchTime.now()
+            let enc = try await inFlight!.value
+            encoderAwaitTotalMs += Self.elapsedMs(since: awaitStarted)
+            copyTotalMs += enc.copyMs
+            melTotalMs += enc.melMs
+            encoderTotalMs += enc.encoderMs
+            sliceTotalMs += enc.sliceMs
+            if enc.totalMs > encodeMaxMs { encodeMaxMs = enc.totalMs }
             if i + 1 < windowStarts.count {
                 inFlight = makeEncoderTask(windowStarts[i + 1])
             } else {
                 inFlight = nil
             }
-            let scores = try Self.forcedDecodeScoresStatic(
+            let decoded = try Self.forcedDecodeScoresStatic(
                 model: decSend.value,
                 keywordTokens: kwTokens,
-                encoderOutput: enc
+                encoderOutput: enc.encoderOutput
             )
-            for (k, sc) in scores.enumerated() {
+            decoderInputTotalMs += decoded.inputMs
+            decoderPredictTotalMs += decoded.predictionMs
+            decoderPostTotalMs += decoded.postprocessMs
+            decoderTotalMs += decoded.totalMs
+            if decoded.totalMs > decoderMaxMs { decoderMaxMs = decoded.totalMs }
+            for (k, sc) in decoded.scores.enumerated() {
                 if sc > maxScoreByIdx[k] { maxScoreByIdx[k] = sc }
             }
         }
+
+        let totalMs = Self.elapsedMs(since: totalStarted)
+        let bestScore = maxScoreByIdx.max() ?? -.infinity
+        scorerLog.debug("kws timing scorer: total=\(Self.ms(totalMs), privacy: .public) windows=\(windowStarts.count, privacy: .public) samples=\(samples.count, privacy: .public) setup=\(Self.ms(setupMs), privacy: .public) awaitEncode=\(Self.ms(encoderAwaitTotalMs), privacy: .public) copy=\(Self.ms(copyTotalMs), privacy: .public) mel=\(Self.ms(melTotalMs), privacy: .public) encoder=\(Self.ms(encoderTotalMs), privacy: .public) slice=\(Self.ms(sliceTotalMs), privacy: .public) encodeMax=\(Self.ms(encodeMaxMs), privacy: .public) decoder=\(Self.ms(decoderTotalMs), privacy: .public) decInput=\(Self.ms(decoderInputTotalMs), privacy: .public) decPredict=\(Self.ms(decoderPredictTotalMs), privacy: .public) decPost=\(Self.ms(decoderPostTotalMs), privacy: .public) decMax=\(Self.ms(decoderMaxMs), privacy: .public) best=\(Self.score(bestScore), privacy: .public)")
 
         return zip(kwTokens, maxScoreByIdx).map { entry, score in
             WhisperKwsScore(keyword: entry.keyword, score: score)
@@ -370,33 +455,54 @@ actor WhisperKwsScorer {
         model: MLModel,
         keywordTokens: [(keyword: String, tokenIds: [Int])],
         encoderOutput: MLMultiArray
-    ) throws -> [Float] {
+    ) throws -> WhisperKwsDecodeScores {
         let N = keywordTokens.count
-        guard N > 0 else { return [] }
+        guard N > 0 else {
+            return WhisperKwsDecodeScores(scores: [], inputMs: 0, predictionMs: 0, postprocessMs: 0, totalMs: 0)
+        }
         let B = decoderBatch
         var scores: [Float] = []
         scores.reserveCapacity(N)
+        var inputMs: Double = 0
+        var predictionMs: Double = 0
+        var postprocessMs: Double = 0
+        var totalMs: Double = 0
         var start = 0
         while start < N {
             let end = min(start + B, N)
             let chunk = Array(keywordTokens[start..<end])
-            scores.append(contentsOf: try forcedDecodeScoresChunkStatic(
+            let decoded = try forcedDecodeScoresChunkStatic(
                 encoderOutput: encoderOutput,
                 keywordChunk: chunk,
                 model: model
-            ))
+            )
+            scores.append(contentsOf: decoded.scores)
+            inputMs += decoded.inputMs
+            predictionMs += decoded.predictionMs
+            postprocessMs += decoded.postprocessMs
+            totalMs += decoded.totalMs
             start = end
         }
-        return scores
+        return WhisperKwsDecodeScores(
+            scores: scores,
+            inputMs: inputMs,
+            predictionMs: predictionMs,
+            postprocessMs: postprocessMs,
+            totalMs: totalMs
+        )
     }
 
     private static func forcedDecodeScoresChunkStatic(
         encoderOutput: MLMultiArray,
         keywordChunk: [(keyword: String, tokenIds: [Int])],
         model: MLModel
-    ) throws -> [Float] {
+    ) throws -> WhisperKwsDecodeScores {
+        let totalStarted = DispatchTime.now()
+        let inputStarted = DispatchTime.now()
         let N = keywordChunk.count
-        guard N > 0 else { return [] }
+        guard N > 0 else {
+            return WhisperKwsDecodeScores(scores: [], inputMs: 0, predictionMs: 0, postprocessMs: 0, totalMs: 0)
+        }
         let B = Self.decoderBatch
         let T = Self.decoderSeqLen
         let prefixCount = Self.decoderPrefixCount
@@ -426,7 +532,11 @@ actor WhisperKwsScorer {
             "input_ids": MLFeatureValue(multiArray: inputIds),
             "encoder_hidden_states": MLFeatureValue(multiArray: encoderOutput),
         ])
+        let inputMs = Self.elapsedMs(since: inputStarted)
+        let predictionStarted = DispatchTime.now()
         let output = try model.prediction(from: input)
+        let predictionMs = Self.elapsedMs(since: predictionStarted)
+        let postStarted = DispatchTime.now()
         guard let logits = output.featureValue(for: "logits")?.multiArrayValue else {
             throw WhisperKwsScorerError.inferenceError("TextDecoderParallel: missing 'logits' output")
         }
@@ -474,18 +584,20 @@ actor WhisperKwsScorer {
         Self.convertFP16RowToFloat(
             rowPtr: logitsPtr + sharedRowBase, vocab: V, dst: sharedRowFloats
         )
+        let sharedRowFloatsAddr = UInt(bitPattern: sharedRowFloats)
 
         DispatchQueue.concurrentPerform(iterations: N) { i in
             let tokens = keywordChunk[i].tokenIds
             let phraseLen = tokens.count - prefixCount
             guard phraseLen > 0 else { return }
             let logitsP = UnsafePointer<Float16>(bitPattern: logitsAddr)!
+            let sharedRow = UnsafePointer<Float>(bitPattern: sharedRowFloatsAddr)!
             var sum: Float = 0
             for k in 0..<phraseLen {
                 let pos = prefixCount - 1 + k
                 let nextToken = tokens[prefixCount + k]
                 if k == 0 {
-                    sum += sharedRowFloats[nextToken] - sharedLogSumExp
+                    sum += sharedRow[nextToken] - sharedLogSumExp
                 } else {
                     let scratch = UnsafeMutablePointer<Float>.allocate(capacity: V)
                     defer { scratch.deallocate() }
@@ -503,7 +615,13 @@ actor WhisperKwsScorer {
             scores[i] = s
             scoresLock.unlock()
         }
-        return scores
+        return WhisperKwsDecodeScores(
+            scores: scores,
+            inputMs: inputMs,
+            predictionMs: predictionMs,
+            postprocessMs: Self.elapsedMs(since: postStarted),
+            totalMs: Self.elapsedMs(since: totalStarted)
+        )
     }
 
     /// log-sum-exp of a 51865-wide row of fp16 logits. Mutates `scratch`.
@@ -620,6 +738,18 @@ actor WhisperKwsScorer {
             }
         }
         throw WhisperKwsScorerError.modelFilesNotFound("\(name).mlmodelc/.mlpackage")
+    }
+
+    private static func elapsedMs(since start: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+    }
+
+    private static func ms(_ value: Double) -> String {
+        String(format: "%.1fms", value)
+    }
+
+    private static func score(_ value: Float) -> String {
+        String(format: "%.2f", value)
     }
 }
 #endif

@@ -18,10 +18,12 @@ protocol WakeEngine: AnyObject {
 
     /// Fires per inference round, regardless of trigger match. Used by the
     /// dev "wake word tracking" toggle to surface what the engine is hearing
-    /// (or scoring) in real time. `isHit` is true iff this round would have
-    /// fired `onDetect`. `levels` carries peak amplitudes for the audio
-    /// window that drove the inference, surfaced behind the dev
-    /// "audio levels" toggle.
+    /// (or scoring) in real time. `isHit` is true iff this round passes the
+    /// engine's detection + debounce gates and would fire `onDetect`.
+    /// Debounced repeats can still surface as non-hit debug rows so the
+    /// audio-level HUD keeps updating without implying another wake open.
+    /// `levels` carries peak amplitudes for the audio window that drove the
+    /// inference, surfaced behind the dev "audio levels" toggle.
     var onTranscript: (@MainActor (_ text: String, _ isHit: Bool, _ levels: AudioLevelStats?) -> Void)? { get set }
 
     @MainActor func start()

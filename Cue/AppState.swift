@@ -385,6 +385,16 @@ final class AppState {
     var palette: Palette { paletteName.palette }
     var speed: Double { Speeds.values[speedIdx] }
 
+    var wakeTrackingSubtitle: String {
+        let triggers = forceDecodeWakeEnabled
+            ? WhisperKwsEngine.userVisibleTriggers
+            : WakeWordEngine.userVisibleTriggers
+        if forceDecodeWakeEnabled {
+            return "Show every forced-decode keyword score as a toast. Scores at or above threshold that pass debounce get a green check. Triggers (\(triggers)). Requires a loaded episode — wake only runs during playback."
+        }
+        return "Show every transcript the wake-word engine picks up as a toast. Trigger matches that pass debounce get a green check. Triggers (\(triggers)). Requires a loaded episode — wake only runs during playback."
+    }
+
     /// Effective duration — AVPlayer's duration when live, else the canned sample transcript.
     var totalDuration: Double {
         if let live {
@@ -1277,4 +1287,3 @@ final class AppState {
         return current
     }
 }
-
