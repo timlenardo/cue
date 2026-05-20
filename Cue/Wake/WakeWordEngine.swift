@@ -22,7 +22,7 @@ import WhisperKit
 /// **Model**
 /// - "openai_whisper-tiny.en" — ~39 M params, ~75 MB on disk. Auto-
 ///   downloaded from HuggingFace on first launch and cached locally.
-final class WakeWordEngine: @unchecked Sendable {
+final class WakeWordEngine: WakeEngine, @unchecked Sendable {
 
     /// Fires whenever the wake phrase is recognised (already on @MainActor).
     /// Debounced by `Debounce` seconds.
@@ -31,11 +31,12 @@ final class WakeWordEngine: @unchecked Sendable {
     /// Fires for every non-empty Whisper transcript, regardless of trigger
     /// match. Used by the dev "wake word tracking" toggle to surface what
     /// the mic is hearing in real time. `isHit` is true iff the trigger
-    /// regex matched (a real wake-word hit, not just background chatter).
-    /// `levels` carries the peak amplitudes / clip rate observed in the
-    /// audio that produced this transcript — surfaced behind the dev
-    /// "audio levels" toggle. Nil iff no audio was observed since the
-    /// previous inference (rare; basically only the first inference).
+    /// regex matched and this inference passed the debounce gate. Debounced
+    /// repeats still surface as non-hit rows so audio levels remain visible
+    /// without implying another wake open. `levels` carries the peak
+    /// amplitudes / clip rate observed in the audio that produced this
+    /// transcript — surfaced behind the dev "audio levels" toggle. Nil iff
+    /// no audio was observed since the previous inference.
     var onTranscript: (@MainActor (_ text: String, _ isHit: Bool, _ levels: AudioLevelStats?) -> Void)?
 
     enum State { case idle, loading, listening, denied, failed(String) }
@@ -89,6 +90,7 @@ final class WakeWordEngine: @unchecked Sendable {
     /// Triggers we accept. Word-boundary, case-insensitive. Add more
     /// aliases here as you hear false-negatives in the logs.
     private static let TriggerPattern = #"\b(orbit|orbits|orbital)\b"#
+    static let userVisibleTriggers = "orbit / orbital / orbits"
 
     // MARK: - State
     private let triggerRegex: NSRegularExpression = {
@@ -304,16 +306,17 @@ final class WakeWordEngine: @unchecked Sendable {
     @MainActor
     private func handleTranscript(_ text: String, levels: AudioLevelStats?) {
         let range = NSRange(text.startIndex..., in: text)
-        let isHit = triggerRegex.firstMatch(in: text, options: [], range: range) != nil
+        let matched = triggerRegex.firstMatch(in: text, options: [], range: range) != nil
+        let now = Date()
+        let shouldFire = matched && now.timeIntervalSince(lastFireAt) >= Self.Debounce
 
         if !text.isEmpty {
-            onTranscript?(text, isHit, levels)
+            onTranscript?(text, shouldFire, levels)
         }
 
-        guard isHit else { return }
+        guard matched else { return }
 
-        let now = Date()
-        if now.timeIntervalSince(lastFireAt) < Self.Debounce {
+        guard shouldFire else {
             log.info("whisper hit (debounced): '\(text, privacy: .public)'")
             return
         }

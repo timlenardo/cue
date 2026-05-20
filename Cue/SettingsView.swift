@@ -17,6 +17,12 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     section(title: "Developer") {
                         toggleRow(
+                            title: "Forced-decode wake engine",
+                            subtitle: "Use the whisper-tiny CoreML forced-decode scorer as the wake-word path. Scores the keyword phrase directly against the audio instead of round-tripping through text. Turn this off to fall back to the older WhisperKit transcribe-and-regex path.",
+                            isOn: $state.forceDecodeWakeEnabled
+                        )
+                        Divider().background(state.palette.cardEdge).padding(.leading, 14)
+                        toggleRow(
                             title: "Pause listening",
                             subtitle: "Hold the wake-word engine down even while an episode is loaded, so ambient conversation can't trigger the AI. Voice mode can still be opened manually.",
                             isOn: $state.wakePaused
@@ -24,13 +30,13 @@ struct SettingsView: View {
                         Divider().background(state.palette.cardEdge).padding(.leading, 14)
                         toggleRow(
                             title: "Wake word tracking",
-                            subtitle: "Show every transcript the wake-word engine picks up as a toast. Triggers (\(WakeWordEngine.userVisibleTriggers)) get a green check. Requires a loaded episode — wake only runs during playback.",
+                            subtitle: state.wakeTrackingSubtitle,
                             isOn: $state.wakeTrackingEnabled
                         )
                         Divider().background(state.palette.cardEdge).padding(.leading, 14)
                         toggleRow(
                             title: "Audio levels",
-                            subtitle: "Append peak amplitudes to each wake transcript: pre-gain → post-gain (pre-clip) in dBFS, plus clip rate. Whisper expects roughly -10 to -3 dBFS for speech. Requires wake word tracking.",
+                            subtitle: "Append peak amplitudes to each wake debug toast: pre-gain → post-gain (pre-clip) in dBFS, plus clip rate. Works with either wake engine. Whisper expects roughly -10 to -3 dBFS for speech. Requires wake word tracking.",
                             isOn: $state.audioLevelsDebugEnabled
                         )
                         Divider().background(state.palette.cardEdge).padding(.leading, 14)
@@ -167,12 +173,3 @@ struct SettingsView: View {
         }
     }
 }
-
-#if os(iOS)
-extension WakeWordEngine {
-    /// Human-readable trigger list for the settings subtitle. Mirrors the
-    /// regex's alternation — kept here so the UI doesn't have to scrape
-    /// the pattern at runtime.
-    static let userVisibleTriggers = "tangent / sidebar / orbit"
-}
-#endif
