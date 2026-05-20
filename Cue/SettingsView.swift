@@ -18,7 +18,7 @@ struct SettingsView: View {
                     section(title: "Developer") {
                         toggleRow(
                             title: "Forced-decode wake engine",
-                            subtitle: "Use the whisper-tiny CoreML forced-decode scorer as the wake-word path. Scores the keyword phrase directly against the audio instead of round-tripping through text. Turn this off to fall back to the older WhisperKit transcribe-and-regex path.",
+                            subtitle: "Use the whisper-tiny CoreML forced-decode scorer while the app is active. Scores the keyword phrase directly against the audio instead of round-tripping through text. Lock screen and background fall back to the older WhisperKit transcribe-and-regex path because iOS rejects background GPU work.",
                             isOn: $state.forceDecodeWakeEnabled
                         )
                         Divider().background(state.palette.cardEdge).padding(.leading, 14)

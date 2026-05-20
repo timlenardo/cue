@@ -85,6 +85,7 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
     nonisolated(unsafe) private var skippedWhileInFlight: Int = 0
     nonisolated(unsafe) private var scorerReady: Bool = false
     nonisolated(unsafe) private var scorerFailureMessage: String?
+    nonisolated(unsafe) private var lifecycleGeneration: UInt64 = 0
 
     // Rolling 16 kHz mono buffer.
     nonisolated private let bufLock = NSLock()
@@ -98,6 +99,7 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
 
     // Mic subscription / resampler.
     private var bufferToken: UUID?
+    private var bootTask: Task<Void, Never>?
     nonisolated private let convertLock = NSLock()
     nonisolated(unsafe) private var converter: AVAudioConverter?
     nonisolated(unsafe) private var sourceFormat: AVAudioFormat?
@@ -110,7 +112,8 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
     @MainActor
     func start() {
         guard bufferToken == nil else { return }
-        loadScorerIfNeeded()
+        let generation = advanceLifecycleGeneration()
+        loadScorerIfNeeded(generation: generation)
         bufferToken = MicCapture.shared.addBufferHandler { [weak self] buffer, _ in
             self?.handle(buffer: buffer)
         }
@@ -122,6 +125,8 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
 
     @MainActor
     func stop() {
+        bootTask?.cancel()
+        bootTask = nil
         if let token = bufferToken {
             MicCapture.shared.removeBufferHandler(token)
             bufferToken = nil
@@ -134,6 +139,7 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         windowSampleCount = 0
         bufLock.unlock()
         stateLock.lock()
+        lifecycleGeneration += 1
         lastInferenceAt = .distantPast
         lastStatusTranscriptAt = .distantPast
         inferenceInFlight = false
@@ -146,31 +152,39 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
     // MARK: - Scorer boot
 
     @MainActor
-    private func loadScorerIfNeeded() {
+    private func loadScorerIfNeeded(generation: UInt64) {
         if scorerReady { return }
         if case .loading = state { return }
         state = .loading
         updateReadiness(.warmingUp)
         log.info("kws scorer loading…")
-        Task.detached(priority: .userInitiated) { [weak self] in
+        bootTask = Task.detached(priority: .userInitiated) { [weak self] in
             let started = DispatchTime.now()
             do {
                 try await WhisperKwsScorer.shared.loadIfNeeded(keywords: WhisperKwsEngine.Keywords)
+                try Task.checkCancellation()
+                guard let self, self.isGenerationCurrent(generation) else { return }
                 let loadMs = Self.elapsedMs(since: started)
                 let warmStarted = DispatchTime.now()
                 try await WhisperKwsScorer.shared.warmUp(sampleCount: WhisperKwsEngine.ScoringWindowSamples)
+                try Task.checkCancellation()
+                guard self.isGenerationCurrent(generation) else { return }
                 let warmMs = Self.elapsedMs(since: warmStarted)
-                await self?.handleScorerReady(loadMs: loadMs, warmMs: warmMs)
+                await self.handleScorerReady(loadMs: loadMs, warmMs: warmMs, generation: generation)
+            } catch is CancellationError {
+                return
             } catch {
                 let msg = error.localizedDescription
                 let loadMs = Self.elapsedMs(since: started)
-                await self?.handleScorerLoadFailure(msg, loadMs: loadMs)
+                await self?.handleScorerLoadFailure(msg, loadMs: loadMs, generation: generation)
             }
         }
     }
 
     @MainActor
-    private func handleScorerReady(loadMs: Double, warmMs: Double) {
+    private func handleScorerReady(loadMs: Double, warmMs: Double, generation: UInt64) {
+        guard isGenerationCurrent(generation) else { return }
+        bootTask = nil
         scorerReady = true
         if bufferToken != nil {
             state = .listening
@@ -183,7 +197,9 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
     }
 
     @MainActor
-    private func handleScorerLoadFailure(_ msg: String, loadMs: Double) {
+    private func handleScorerLoadFailure(_ msg: String, loadMs: Double, generation: UInt64) {
+        guard isGenerationCurrent(generation) else { return }
+        bootTask = nil
         state = .failed(msg)
         updateReadiness(.unavailable(msg))
         stateLock.lock()
@@ -229,6 +245,7 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         let intervalMs = Double(Self.InferenceIntervalMs)
         let ready = scorerReady
         let failureMessage = scorerFailureMessage
+        let generation = lifecycleGeneration
         let shouldEmitStatus = !ready && now.timeIntervalSince(lastStatusTranscriptAt) >= Self.StatusTranscriptInterval
         if shouldEmitStatus {
             lastStatusTranscriptAt = now
@@ -282,9 +299,10 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
                 levels: levels,
                 scheduledAt: scheduledAt,
                 snapshotMs: snapshotMs,
-                ringSampleCount: snapshot.count
+                ringSampleCount: snapshot.count,
+                generation: generation
             )
-            self?.markInferenceComplete()
+            self?.markInferenceComplete(generation: generation)
         }
     }
 
@@ -293,8 +311,10 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         levels: AudioLevelStats?,
         scheduledAt: DispatchTime,
         snapshotMs: Double,
-        ringSampleCount: Int
+        ringSampleCount: Int,
+        generation: UInt64
     ) async {
+        guard !Task.isCancelled, isGenerationCurrent(generation) else { return }
         let started = DispatchTime.now()
         let queueMs = Self.elapsedMs(since: scheduledAt)
         // Optional leading silence pad (currently 0 — forced-decode handles
@@ -308,18 +328,24 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         do {
             let scoreStarted = DispatchTime.now()
             let scores = try await WhisperKwsScorer.shared.maxScores(in: padded)
+            guard !Task.isCancelled, isGenerationCurrent(generation) else { return }
             let scoreMs = Self.elapsedMs(since: scoreStarted)
             guard let best = scores.max(by: { $0.score < $1.score }) else { return }
             let mainStarted = DispatchTime.now()
-            await MainActor.run { self.handleScores(scores, best: best, levels: levels) }
+            await MainActor.run {
+                guard self.isGenerationCurrent(generation) else { return }
+                self.handleScores(scores, best: best, levels: levels)
+            }
             let mainMs = Self.elapsedMs(since: mainStarted)
             let totalMs = Self.elapsedMs(since: started)
             log.debug("kws timing engine: total=\(Self.ms(totalMs), privacy: .public) queue=\(Self.ms(queueMs), privacy: .public) snapshot=\(Self.ms(snapshotMs), privacy: .public) pad=\(Self.ms(padMs), privacy: .public) scorer=\(Self.ms(scoreMs), privacy: .public) samples=\(samples.count, privacy: .public) ringSamples=\(ringSampleCount, privacy: .public) main=\(Self.ms(mainMs), privacy: .public) best=\(best.keyword, privacy: .public) \(Self.score(best.score), privacy: .public)")
         } catch {
+            guard isGenerationCurrent(generation) else { return }
             let msg = error.localizedDescription
             let totalMs = Self.elapsedMs(since: started)
             log.error("kws inference failed after \(Self.ms(totalMs), privacy: .public): \(msg, privacy: .public)")
             await MainActor.run {
+                guard self.isGenerationCurrent(generation) else { return }
                 self.onTranscript?(Self.statusTranscriptText(for: msg), false, levels)
             }
         }
@@ -407,9 +433,26 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         String(format: "%.2f", value)
     }
 
-    private nonisolated func markInferenceComplete() {
+    private nonisolated func advanceLifecycleGeneration() -> UInt64 {
         stateLock.lock()
-        inferenceInFlight = false
+        lifecycleGeneration += 1
+        let generation = lifecycleGeneration
+        stateLock.unlock()
+        return generation
+    }
+
+    private nonisolated func isGenerationCurrent(_ generation: UInt64) -> Bool {
+        stateLock.lock()
+        let current = lifecycleGeneration
+        stateLock.unlock()
+        return current == generation
+    }
+
+    private nonisolated func markInferenceComplete(generation: UInt64) {
+        stateLock.lock()
+        if lifecycleGeneration == generation {
+            inferenceInFlight = false
+        }
         stateLock.unlock()
     }
 
