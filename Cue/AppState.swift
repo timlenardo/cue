@@ -6,6 +6,11 @@ import AVFAudio
 
 enum Tab: String { case listen, library, notes }
 
+private enum WakeEngineKind: Equatable {
+    case whisperKit
+    case forcedDecode
+}
+
 /// Peak amplitude / clip-rate snapshot for the audio window that produced
 /// a given wake transcript. Surfaced behind the dev "audio levels" toggle
 /// so we can verify Whisper is getting input in its training distribution
@@ -273,16 +278,16 @@ final class AppState {
     }
 
     /// Dev toggle: when on, use the whisper-tiny CoreML forced-decode scorer
-    /// (`WhisperKwsEngine`). Turning it off falls back to the older WhisperKit
-    /// free-decode + regex path (`WakeWordEngine`). Flipping this stops the
-    /// current engine, swaps in the new one, rebinds callbacks, and re-arms
-    /// if an episode was loaded. Defaults on for new installs and persists
-    /// across launches once changed.
+    /// (`WhisperKwsEngine`) while the app is active. When the app resigns
+    /// active (including lock-screen/background), we fall back to the older
+    /// WhisperKit free-decode + regex path (`WakeWordEngine`) because iOS
+    /// rejects background Metal/GPU work. Defaults on for new installs and
+    /// persists across launches once changed.
     var forceDecodeWakeEnabled: Bool = AppState.loadForceDecodeWake() {
         didSet {
             guard oldValue != forceDecodeWakeEnabled else { return }
             AppState.saveForceDecodeWake(forceDecodeWakeEnabled)
-            swapWakeEngine()
+            reconcileWakeEngineForCurrentState()
         }
     }
 
@@ -378,17 +383,39 @@ final class AppState {
     var voiceSession: RealtimeVoiceSession?
 
     @ObservationIgnored let audio = AudioPlayer()
-    /// Current wake engine. `var` (not `let`) so the dev
-    /// `forceDecodeWakeEnabled` toggle can swap implementations at runtime
-    /// via `swapWakeEngine()`. Both implementations conform to `WakeEngine`,
-    /// so AppState wiring sites (callbacks, start/stop) don't care which.
-    @ObservationIgnored var wake: WakeEngine = AppState.makeWakeEngine()
+    /// Effective wake engine currently installed. This follows the persisted
+    /// `forceDecodeWakeEnabled` preference only while the app is active; the
+    /// lock-screen/background path always uses WhisperKit so it does not submit
+    /// GPU work from the background.
+    @ObservationIgnored private var wakeEngineKind: WakeEngineKind = AppState.initialWakeEngineKind()
+    /// Current wake engine. `var` (not `let`) so scene phase and the dev
+    /// `forceDecodeWakeEnabled` toggle can swap implementations at runtime.
+    /// Both implementations conform to `WakeEngine`, so AppState wiring sites
+    /// (callbacks, start/stop) don't care which.
+    @ObservationIgnored var wake: WakeEngine = AppState.makeWakeEngine(kind: AppState.initialWakeEngineKind())
+    /// Incremented each time callbacks are rebound so in-flight completions
+    /// from a stopped/replaced engine cannot open voice mode or surface stale
+    /// debug toasts.
+    @ObservationIgnored private var wakeCallbackGeneration: UInt64 = 0
 
-    private static func makeWakeEngine() -> WakeEngine {
-        if loadForceDecodeWake() {
+    private static func initialWakeEngineKind() -> WakeEngineKind {
+        desiredWakeEngineKind(forceDecodeEnabled: loadForceDecodeWake(), scenePhaseActive: true)
+    }
+
+    private static func desiredWakeEngineKind(
+        forceDecodeEnabled: Bool,
+        scenePhaseActive: Bool
+    ) -> WakeEngineKind {
+        forceDecodeEnabled && scenePhaseActive ? .forcedDecode : .whisperKit
+    }
+
+    private static func makeWakeEngine(kind: WakeEngineKind) -> WakeEngine {
+        switch kind {
+        case .forcedDecode:
             return WhisperKwsEngine()
+        case .whisperKit:
+            return WakeWordEngine()
         }
-        return WakeWordEngine()
     }
     /// Mirrors the scene phase so updateWakeArmed() knows whether to listen.
     /// RootView pushes updates via sceneDidChange(active:).
@@ -435,11 +462,15 @@ final class AppState {
     }
 
     var wakeTrackingSubtitle: String {
-        let triggers = forceDecodeWakeEnabled
+        let activeKind = Self.desiredWakeEngineKind(
+            forceDecodeEnabled: forceDecodeWakeEnabled,
+            scenePhaseActive: scenePhaseActive
+        )
+        let triggers = activeKind == .forcedDecode
             ? WhisperKwsEngine.userVisibleTriggers
             : WakeWordEngine.userVisibleTriggers
-        if forceDecodeWakeEnabled {
-            return "Show every forced-decode keyword score as a toast. Scores at or above threshold that pass debounce get a green check. Triggers (\(triggers)). Requires a loaded episode — wake only runs during playback."
+        if activeKind == .forcedDecode {
+            return "Show every forced-decode keyword score as a toast. Scores at or above threshold that pass debounce get a green check. Triggers (\(triggers)). Requires a loaded episode — wake only runs during playback. Lock screen falls back to WhisperKit to avoid background GPU work."
         }
         return "Show every transcript the wake-word engine picks up as a toast. Trigger matches that pass debounce get a green check. Triggers (\(triggers)). Requires a loaded episode — wake only runs during playback."
     }
@@ -599,13 +630,16 @@ final class AppState {
     // `UIBackgroundModes: audio` (set in Info.plist) is what lets iOS
     // allow the mic to keep recording in background.
 
-    /// Wake detection deliberately ignores scene phase so it works on a
-    /// locked phone. The Live Activity glow sampler does not — running
-    /// the 5Hz push loop in the background burns ActivityKit's push
-    /// budget for no visible benefit (the lock screen is what the user
-    /// sees while backgrounded, and the LA there is read-only anyway).
+    /// Wake arming deliberately ignores scene phase so it works on a locked
+    /// phone, but the chosen engine does not: forced-decode uses CoreML GPU
+    /// work, so it is foreground-only and we swap to WhisperKit before the app
+    /// backgrounds. The Live Activity glow sampler also stops in background —
+    /// running the 5Hz push loop there burns ActivityKit's push budget for no
+    /// visible benefit (the lock screen is what the user sees while
+    /// backgrounded, and the LA there is read-only anyway).
     func sceneDidChange(active: Bool) {
         scenePhaseActive = active
+        reconcileWakeEngineForCurrentState()
         if !active {
             stopLiveActivityGlowSampler()
         } else {
@@ -660,12 +694,15 @@ final class AppState {
     }
 
     /// Attach `onDetect` / `onTranscript` to the current `wake` instance.
-    /// Called from `init()` and re-called by `swapWakeEngine()` after a
-    /// toggle flip replaces the engine.
+    /// Called from `init()` and re-called after a toggle or scene-phase change
+    /// replaces the engine.
     @MainActor
     private func bindWakeCallbacks() {
+        wakeCallbackGeneration += 1
+        let generation = wakeCallbackGeneration
         wake.onDetect = { [weak self] in
             guard let self else { return }
+            guard generation == self.wakeCallbackGeneration else { return }
             // Defensive: the gating in updateWakeArmed should already prevent
             // wake from listening with no episode loaded, but if an in-flight
             // inference completes after stop() (or any other edge case leaks
@@ -673,6 +710,10 @@ final class AppState {
             // loaded to talk about.
             guard self.live != nil else {
                 print("[wake] onDetect dropped — no live episode")
+                return
+            }
+            guard self.wakeArmed, !self.voiceOpen, !self.wakePaused else {
+                print("[wake] onDetect dropped — wake is not armed")
                 return
             }
             Analytics.shared.track(
@@ -684,19 +725,35 @@ final class AppState {
             self.openVoiceAgent(source: .wakeWord)
         }
         wake.onTranscript = { [weak self] text, isHit, levels in
-            self?.addWakeTranscript(text, isHit: isHit, levels: levels)
+            guard let self else { return }
+            guard generation == self.wakeCallbackGeneration, self.wakeArmed else { return }
+            self.addWakeTranscript(text, isHit: isHit, levels: levels)
         }
     }
 
-    /// Stop the current engine, instantiate the one selected by the
-    /// `forceDecodeWakeEnabled` toggle, rebind callbacks, and re-arm if an
-    /// episode is loaded. Called from the toggle's `didSet`.
+    /// Reconcile the installed wake engine against the user's forced-decode
+    /// preference and the current scene phase.
     @MainActor
-    private func swapWakeEngine() {
+    private func reconcileWakeEngineForCurrentState() {
+        let desired = Self.desiredWakeEngineKind(
+            forceDecodeEnabled: forceDecodeWakeEnabled,
+            scenePhaseActive: scenePhaseActive
+        )
+        guard desired != wakeEngineKind else { return }
+        swapWakeEngine(to: desired)
+    }
+
+    /// Stop the current engine, instantiate `kind`, rebind callbacks, and
+    /// re-arm if an episode was already loaded.
+    @MainActor
+    private func swapWakeEngine(to kind: WakeEngineKind) {
         let wasArmed = wakeArmed
+        wake.onDetect = nil
+        wake.onTranscript = nil
         wake.stop()
         wakeArmed = false
-        wake = Self.makeWakeEngine()
+        wakeEngineKind = kind
+        wake = Self.makeWakeEngine(kind: kind)
         bindWakeCallbacks()
         // Re-evaluate the armed condition against the (still-current)
         // live / voiceOpen / wakePaused state. updateWakeArmed is
