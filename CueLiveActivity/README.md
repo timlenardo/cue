@@ -34,7 +34,7 @@ new Widget Extension target.
    Navigator → File Inspector (right pane) → **Target Membership** → tick
    the **CueLiveActivity** box in addition to **Cue**.
 8. Build (⌘B). If the extension's deployment target complains, set it to
-   match the app (iOS 26.0).
+   match the app (iOS 18.0).
 
 That's it. Run on a physical device or the iPhone 16 Pro simulator (Dynamic
 Island only renders on Pro models). Start playing an episode, then home-
