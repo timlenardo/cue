@@ -452,9 +452,11 @@ final class AppState {
     @ObservationIgnored private var lastSyncAt: Date?
 
     private static let voiceSessionPrefetchExpiryLeadSeconds: TimeInterval = 12
-    private static let voiceSessionPrefetchMaxPositionSkewSeconds: TimeInterval = 45
+    private static let voiceSessionPrefetchMaxPositionSkewSeconds: TimeInterval = 8
+    private static let voiceSessionPrefetchPositionRefreshLeadSeconds: TimeInterval = 2
     private static let voiceSessionPrefetchRetryDelaySeconds: TimeInterval = 10
     private static let voiceSessionPrefetchMinimumRefreshDelaySeconds: TimeInterval = 5
+    private static let voiceSessionPrefetchMinimumPositionRefreshDelaySeconds: TimeInterval = 1
 
     var liveTranscriptIndexingProgress: TranscriptIndexingProgress?
     var palette: Palette { paletteName.palette }
@@ -981,13 +983,18 @@ final class AppState {
             return nil
         }
 
-        guard voiceSessionPrefetch(cached, isUsableFor: request, now: Date()) else {
+        let now = Date()
+        guard voiceSessionPrefetch(cached, isUsableFor: request, now: now) else {
             prefetchedVoiceSession = nil
             voiceSessionPrefetchRefreshTask?.cancel()
             voiceSessionPrefetchRefreshTask = nil
             Analytics.shared.track(
                 "voice_session_prefetch_missed",
-                properties: ["reason": "stale"]
+                properties: voiceSessionPrefetchMissProperties(
+                    cached,
+                    for: request,
+                    now: now
+                )
             )
             return nil
         }
@@ -1021,11 +1028,45 @@ final class AppState {
         isUsableFor request: VoiceSessionPrefetchRequest,
         now: Date
     ) -> Bool {
-        guard cached.request.sameEpisode(as: request) else { return false }
-        guard abs(request.pausedAtSeconds - cached.request.pausedAtSeconds) <= Self.voiceSessionPrefetchMaxPositionSkewSeconds else {
-            return false
+        voiceSessionPrefetchStaleReason(cached, for: request, now: now) == nil
+    }
+
+    private func voiceSessionPrefetchStaleReason(
+        _ cached: VoiceSessionPrefetch,
+        for request: VoiceSessionPrefetchRequest,
+        now: Date
+    ) -> String? {
+        guard cached.request.sameEpisode(as: request) else { return "episode_changed" }
+        guard voiceSessionPrefetchPositionSkew(cached, for: request) <= Self.voiceSessionPrefetchMaxPositionSkewSeconds else {
+            return "position_skew"
         }
-        return voiceSessionResponseHasReusableExpiry(cached.response, now: now)
+        guard voiceSessionResponseHasReusableExpiry(cached.response, now: now) else {
+            return "expires_soon"
+        }
+        return nil
+    }
+
+    private func voiceSessionPrefetchMissProperties(
+        _ cached: VoiceSessionPrefetch,
+        for request: VoiceSessionPrefetchRequest,
+        now: Date
+    ) -> [String: Any?] {
+        let expiresIn = secondsUntilVoiceSessionExpiry(cached.response, now: now)
+        return [
+            "reason": voiceSessionPrefetchStaleReason(cached, for: request, now: now) ?? "unknown",
+            "age_ms": Int(now.timeIntervalSince(cached.fetchedAt) * 1000),
+            "position_skew_s": voiceSessionPrefetchPositionSkew(cached, for: request),
+            "max_position_skew_s": Self.voiceSessionPrefetchMaxPositionSkewSeconds,
+            "expires_in_s": expiresIn.map { Int($0) },
+            "trace_id": cached.response.traceId,
+        ]
+    }
+
+    private func voiceSessionPrefetchPositionSkew(
+        _ cached: VoiceSessionPrefetch,
+        for request: VoiceSessionPrefetchRequest
+    ) -> TimeInterval {
+        abs(request.pausedAtSeconds - cached.request.pausedAtSeconds)
     }
 
     private func voiceSessionResponseHasReusableExpiry(
@@ -1052,16 +1093,48 @@ final class AppState {
               let expiresIn = secondsUntilVoiceSessionExpiry(cached.response, now: Date())
         else { return }
 
-        let refreshIn = max(
+        let expiryRefreshIn = max(
             Self.voiceSessionPrefetchMinimumRefreshDelaySeconds,
             expiresIn - Self.voiceSessionPrefetchExpiryLeadSeconds
         )
+        let refreshPlan: (delay: TimeInterval, reason: String, clearCache: Bool)
+        if let positionRefreshIn = voiceSessionPrefetchPositionRefreshDelay(for: cached),
+           positionRefreshIn < expiryRefreshIn {
+            refreshPlan = (positionRefreshIn, "position_stale", true)
+        } else {
+            refreshPlan = (expiryRefreshIn, "expires_soon", false)
+        }
+
         voiceSessionPrefetchRefreshTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.nanoseconds(for: refreshIn))
+            try? await Task.sleep(nanoseconds: Self.nanoseconds(for: refreshPlan.delay))
             guard !Task.isCancelled else { return }
             self?.voiceSessionPrefetchRefreshTask = nil
-            self?.startVoiceSessionPrefetch(reason: "expires_soon")
+            if refreshPlan.clearCache {
+                self?.invalidateVoiceSessionPrefetchForPositionChange(reason: refreshPlan.reason)
+            } else {
+                self?.startVoiceSessionPrefetch(reason: refreshPlan.reason)
+            }
         }
+    }
+
+    private func voiceSessionPrefetchPositionRefreshDelay(
+        for cached: VoiceSessionPrefetch
+    ) -> TimeInterval? {
+        guard audio.isPlaying,
+              let current = currentVoiceSessionPrefetchRequest(),
+              cached.request.sameEpisode(as: current)
+        else { return nil }
+
+        let refreshAtSkew = max(
+            0,
+            Self.voiceSessionPrefetchMaxPositionSkewSeconds - Self.voiceSessionPrefetchPositionRefreshLeadSeconds
+        )
+        let remainingSkew = refreshAtSkew - voiceSessionPrefetchPositionSkew(cached, for: current)
+        let playbackRate = max(abs(speed), 0.1)
+        return max(
+            Self.voiceSessionPrefetchMinimumPositionRefreshDelaySeconds,
+            remainingSkew / playbackRate
+        )
     }
 
     private func scheduleVoiceSessionPrefetchRetry(reason: String) {
