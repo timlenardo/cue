@@ -33,10 +33,12 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
     // MARK: - WakeEngine surface
 
     var onDetect: (@MainActor () -> Void)?
+    var onReadinessChange: (@MainActor (_ readiness: WakeReadiness) -> Void)?
     var onTranscript: (@MainActor (_ text: String, _ isHit: Bool, _ levels: AudioLevelStats?) -> Void)?
 
     enum State { case idle, loading, listening, denied, failed(String) }
     private(set) var state: State = .idle
+    private(set) var readiness: WakeReadiness = .inactive
 
     // MARK: - Tunables (parallel WakeWordEngine constants where it makes sense)
 
@@ -113,6 +115,7 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
             self?.handle(buffer: buffer)
         }
         state = .listening
+        updateReadiness(scorerReady ? .ready : .warmingUp)
         onTranscript?(Self.statusTranscriptText(for: nil), false, nil)
         log.info("kws wake handler registered")
     }
@@ -136,6 +139,7 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         inferenceInFlight = false
         stateLock.unlock()
         if case .listening = state { state = .idle }
+        updateReadiness(.inactive)
         log.info("kws wake handler unregistered")
     }
 
@@ -146,6 +150,7 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         if scorerReady { return }
         if case .loading = state { return }
         state = .loading
+        updateReadiness(.warmingUp)
         log.info("kws scorer loading…")
         Task.detached(priority: .userInitiated) { [weak self] in
             let started = DispatchTime.now()
@@ -169,8 +174,10 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
         scorerReady = true
         if bufferToken != nil {
             state = .listening
+            updateReadiness(.ready)
         } else {
             state = .idle
+            updateReadiness(.inactive)
         }
         log.info("kws scorer ready in \(Self.ms(loadMs), privacy: .public), warmup=\(Self.ms(warmMs), privacy: .public)")
     }
@@ -178,11 +185,19 @@ final class WhisperKwsEngine: WakeEngine, @unchecked Sendable {
     @MainActor
     private func handleScorerLoadFailure(_ msg: String, loadMs: Double) {
         state = .failed(msg)
+        updateReadiness(.unavailable(msg))
         stateLock.lock()
         scorerFailureMessage = msg
         stateLock.unlock()
         onTranscript?(Self.statusTranscriptText(for: msg), false, nil)
         log.error("kws scorer load failed after \(Self.ms(loadMs), privacy: .public): \(msg, privacy: .public)")
+    }
+
+    @MainActor
+    private func updateReadiness(_ next: WakeReadiness) {
+        guard readiness != next else { return }
+        readiness = next
+        onReadinessChange?(next)
     }
 
     // MARK: - Audio path (audio render thread)
