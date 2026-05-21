@@ -293,6 +293,11 @@ struct VoiceSessionActivationResponse: Decodable {
     let traceId: String?
 }
 
+struct VoiceContextResponse: Decodable {
+    let contextMessage: String?
+    let traceId: String?
+}
+
 struct SearchTranscriptRequest: Encodable {
     let audioUrl: String
     let query: String
@@ -526,6 +531,31 @@ final class CueAPI {
             prefetchFetchMs: prefetchFetchMs,
             tokenExpiresAt: tokenExpiresAt
         ))
+    }
+
+    /// Rebuilds only the rolling transcript context for the exact current
+    /// playback position. Used with prefetched Realtime tokens so token
+    /// minting stays off the tap path without reusing stale context.
+    func requestVoiceContext(
+        audioUrl: String,
+        pausedAtSeconds: Double,
+        totalDurationSeconds: Double?,
+        episodeTitle: String,
+        showTitle: String,
+        traceId: String? = nil
+    ) async throws -> VoiceContextResponse {
+        try await post(
+            "/v1/voice/context",
+            body: VoiceSessionRequest(
+                audioUrl: audioUrl,
+                pausedAtSeconds: pausedAtSeconds,
+                totalDurationSeconds: totalDurationSeconds,
+                episodeTitle: episodeTitle,
+                showTitle: showTitle,
+                traceMode: nil
+            ),
+            headers: traceHeaders(traceId: traceId, callId: nil)
+        )
     }
 
     /// Server-side handler for the `search_transcript` realtime tool —

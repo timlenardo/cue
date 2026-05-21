@@ -8,6 +8,7 @@ import os
 private let log = Logger(subsystem: "com.toug.cue", category: "RealtimeVoice")
 private let startupMaxAttempts = 3
 private let startupRetryBaseDelayNs: UInt64 = 350_000_000
+private let freshContextOpenWaitNs: UInt64 = 150_000_000
 
 /// One OpenAI Realtime voice conversation, end-to-end.
 ///
@@ -88,6 +89,7 @@ final class RealtimeVoiceSession: NSObject {
     @ObservationIgnored private var peerConnection: RTCPeerConnection?
     @ObservationIgnored private var dataChannel: RTCDataChannel?
     @ObservationIgnored private var pendingContextMessage: String?
+    @ObservationIgnored private var pendingFreshContextTask: Task<FreshContextResult?, Never>?
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
 
     /// Forwards every realtime event to cue-server for Langfuse tracing.
@@ -104,6 +106,17 @@ final class RealtimeVoiceSession: NSObject {
         var peerSetupMs: Int?
         var sdpExchangeMs: Int?
         var attempt: Int = 1
+    }
+
+    private struct FreshContextResult: Sendable {
+        let message: String?
+        let fetchMs: Int
+        let traceId: String?
+    }
+
+    private enum FreshContextWaitResult: Sendable {
+        case completed(FreshContextResult?)
+        case timedOut
     }
 
     /// RTCInitializeSSL must be called exactly once per process. This
@@ -327,11 +340,16 @@ final class RealtimeVoiceSession: NSObject {
         let traceIdForTelemetry = resp.traceId ?? activatedTraceId
         log.info("start attempt \(attempt)/\(startupMaxAttempts) \(sessionSource, privacy: .public) ok in \(sessionMs)ms expiresAt=\(resp.expiresAt ?? 0) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(traceIdForTelemetry ?? "<none>", privacy: .public)")
         self.pendingContextMessage = resp.contextMessage
+        pendingFreshContextTask?.cancel()
+        pendingFreshContextTask = nil
         if let tid = traceIdForTelemetry {
             self.traceId = tid
             let tel = VoiceTelemetry(traceId: tid, api: api)
             self.telemetry = tel
             Task { await tel.start() }
+        }
+        if sessionSource == "prefetch" {
+            startFreshContextFetch(context: context, traceId: traceIdForTelemetry)
         }
 
         let peerStarted = Date()
@@ -368,6 +386,67 @@ final class RealtimeVoiceSession: NSObject {
         // From here, RTCDataChannelDelegate.dataChannelDidChangeState
         // will flip to .listening once the channel opens and we've
         // sent the context message.
+    }
+
+    private func startFreshContextFetch(context: Context, traceId: String?) {
+        let started = Date()
+        pendingFreshContextTask = Task { [api] in
+            do {
+                let response = try await api.requestVoiceContext(
+                    audioUrl: context.audioUrl,
+                    pausedAtSeconds: context.pausedAtSeconds,
+                    totalDurationSeconds: context.totalDurationSeconds,
+                    episodeTitle: context.episodeTitle,
+                    showTitle: context.showTitle,
+                    traceId: traceId
+                )
+                let ms = Self.elapsedMs(since: started)
+                log.info("fresh context ok in \(ms)ms chars=\(response.contextMessage?.count ?? 0) traceId=\(response.traceId ?? traceId ?? "<none>", privacy: .public)")
+                Analytics.shared.track(
+                    "voice_context_refreshed",
+                    properties: [
+                        "trace_id": traceId,
+                        "ms": ms,
+                        "context_chars": response.contextMessage?.count,
+                    ]
+                )
+                return FreshContextResult(
+                    message: response.contextMessage,
+                    fetchMs: ms,
+                    traceId: response.traceId
+                )
+            } catch {
+                let ms = Self.elapsedMs(since: started)
+                log.warning("fresh context failed in \(ms)ms details=\(error.localizedDescription, privacy: .public)")
+                Analytics.shared.track(
+                    "voice_context_refresh_failed",
+                    properties: [
+                        "trace_id": traceId,
+                        "ms": ms,
+                        "error_message": error.localizedDescription,
+                    ]
+                )
+                return nil
+            }
+        }
+    }
+
+    private static func waitForFreshContext(
+        _ task: Task<FreshContextResult?, Never>,
+        timeoutNanoseconds: UInt64
+    ) async -> FreshContextWaitResult {
+        await withTaskGroup(of: FreshContextWaitResult.self) { group in
+            group.addTask {
+                .completed(await task.value)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return .timedOut
+            }
+            let result = await group.next() ?? .timedOut
+            group.cancelAll()
+            return result
+        }
     }
 
     private func cleanupFailedStartupAttempt(_ error: Error) {
@@ -547,8 +626,15 @@ final class RealtimeVoiceSession: NSObject {
     // MARK: - Data channel: open + inbound events
 
     private func handleDataChannelOpen() {
-        if let msg = pendingContextMessage {
-            log.info("sending context message (\(msg.count) chars)")
+        Task { [weak self] in
+            await self?.finishDataChannelOpen()
+        }
+    }
+
+    private func finishDataChannelOpen() async {
+        let context = await contextMessageForDataChannelOpen()
+        if let msg = context.message {
+            log.info("sending context message (\(msg.count) chars) source=\(context.source, privacy: .public) freshMs=\(context.freshFetchMs ?? -1) waitMs=\(context.waitMs)")
             sendEvent([
                 "type": "conversation.item.create",
                 "item": [
@@ -559,9 +645,47 @@ final class RealtimeVoiceSession: NSObject {
             ])
         }
         pendingContextMessage = nil
+        if context.source == "prefetch_context_refresh_timeout" {
+            pendingFreshContextTask?.cancel()
+        }
+        pendingFreshContextTask = nil
         phase = .listening
+        Analytics.shared.track(
+            "voice_context_sent",
+            properties: [
+                "trace_id": traceId,
+                "source": context.source,
+                "fresh_fetch_ms": context.freshFetchMs,
+                "wait_ms": context.waitMs,
+                "context_chars": context.message?.count,
+            ]
+        )
         recordReadyLatency()
         SoundEffectPlayer.shared.play(.voiceReady)
+    }
+
+    private func contextMessageForDataChannelOpen() async -> (
+        message: String?,
+        source: String,
+        freshFetchMs: Int?,
+        waitMs: Int
+    ) {
+        let fallback = pendingContextMessage
+        guard let task = pendingFreshContextTask else {
+            return (fallback, "session", nil, 0)
+        }
+
+        let waitStarted = Date()
+        switch await Self.waitForFreshContext(task, timeoutNanoseconds: freshContextOpenWaitNs) {
+        case .completed(let fresh):
+            let waitMs = Self.elapsedMs(since: waitStarted)
+            guard let fresh, let message = fresh.message else {
+                return (fallback, "prefetch_context_refresh_failed", nil, waitMs)
+            }
+            return (message, "fresh_context", fresh.fetchMs, waitMs)
+        case .timedOut:
+            return (fallback, "prefetch_context_refresh_timeout", nil, Self.elapsedMs(since: waitStarted))
+        }
     }
 
     private func recordReadyLatency() {
@@ -744,6 +868,8 @@ final class RealtimeVoiceSession: NSObject {
         peerConnection?.close()
         peerConnection = nil
         pendingContextMessage = nil
+        pendingFreshContextTask?.cancel()
+        pendingFreshContextTask = nil
 
         // POC: do NOT reconfigure the AVAudioSession here. With the custom
         // RTCAudioDevice (CueAudioDevice), MicCapture owns the session
