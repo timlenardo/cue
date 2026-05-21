@@ -47,6 +47,7 @@ final class RealtimeVoiceSession: NSObject {
         let episodeTitle: String
         let showTitle: String
         let preparedSession: VoiceSessionResponse?
+        let preparedSessionRequest: VoiceSessionPrefetchRequest?
         let preparedSessionFetchMs: Int?
     }
 
@@ -275,10 +276,33 @@ final class RealtimeVoiceSession: NSObject {
         let resp: VoiceSessionResponse
         var sessionSource = "mint"
         var sessionMs = 0
+        var activatedTraceId: String?
         if attempt == 1, let prepared = context.preparedSession {
             resp = prepared
             sessionSource = "prefetch"
             log.info("start attempt \(attempt)/\(startupMaxAttempts) using prefetched voice session expiresAt=\(prepared.expiresAt ?? 0) ctxChars=\(prepared.contextMessage?.count ?? 0) traceId=\(prepared.traceId ?? "<none>", privacy: .public)")
+            if prepared.traceId == nil {
+                let activationStarted = Date()
+                let request = context.preparedSessionRequest
+                do {
+                    let activated = try await api.activatePrefetchedVoiceSession(
+                        audioUrl: request?.audioUrl ?? context.audioUrl,
+                        pausedAtSeconds: request?.pausedAtSeconds ?? context.pausedAtSeconds,
+                        totalDurationSeconds: request?.totalDurationSeconds ?? context.totalDurationSeconds,
+                        episodeTitle: request?.episodeTitle ?? context.episodeTitle,
+                        showTitle: request?.showTitle ?? context.showTitle,
+                        prefetchFetchMs: context.preparedSessionFetchMs,
+                        tokenExpiresAt: prepared.expiresAt
+                    )
+                    activatedTraceId = activated.traceId
+                    log.info("start attempt \(attempt)/\(startupMaxAttempts) activated prefetched trace in \(Self.elapsedMs(since: activationStarted))ms traceId=\(activated.traceId ?? "<none>", privacy: .public)")
+                } catch {
+                    // Tracing should never block the voice UX. If activation
+                    // fails, continue without Langfuse telemetry for this
+                    // prefetched session.
+                    log.warning("start attempt \(attempt)/\(startupMaxAttempts) prefetched trace activation failed in \(Self.elapsedMs(since: activationStarted))ms details=\(self.startupFailureDetails(error), privacy: .public)")
+                }
+            }
         } else {
             let mintStarted = Date()
             log.info("start attempt \(attempt)/\(startupMaxAttempts) mint begin")
@@ -300,9 +324,10 @@ final class RealtimeVoiceSession: NSObject {
         startupMetrics?.attempt = attempt
         startupMetrics?.sessionSource = sessionSource
         startupMetrics?.sessionMs = sessionMs
-        log.info("start attempt \(attempt)/\(startupMaxAttempts) \(sessionSource, privacy: .public) ok in \(sessionMs)ms expiresAt=\(resp.expiresAt ?? 0) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(resp.traceId ?? "<none>", privacy: .public)")
+        let traceIdForTelemetry = resp.traceId ?? activatedTraceId
+        log.info("start attempt \(attempt)/\(startupMaxAttempts) \(sessionSource, privacy: .public) ok in \(sessionMs)ms expiresAt=\(resp.expiresAt ?? 0) ctxChars=\(resp.contextMessage?.count ?? 0) traceId=\(traceIdForTelemetry ?? "<none>", privacy: .public)")
         self.pendingContextMessage = resp.contextMessage
-        if let tid = resp.traceId {
+        if let tid = traceIdForTelemetry {
             self.traceId = tid
             let tel = VoiceTelemetry(traceId: tid, api: api)
             self.telemetry = tel

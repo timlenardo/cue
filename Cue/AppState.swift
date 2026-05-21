@@ -172,7 +172,7 @@ enum VoiceEntrySource: String {
     case micButton = "mic_button"
 }
 
-private struct VoiceSessionPrefetchRequest: Equatable {
+struct VoiceSessionPrefetchRequest: Equatable {
     let audioUrl: String
     let pausedAtSeconds: Double
     let totalDurationSeconds: Double?
@@ -202,6 +202,7 @@ private struct VoiceSessionPrefetch {
 }
 
 private struct ConsumedVoiceSessionPrefetch {
+    let request: VoiceSessionPrefetchRequest
     let response: VoiceSessionResponse
     let fetchMs: Int
 }
@@ -992,7 +993,8 @@ final class AppState {
                     pausedAtSeconds: request.pausedAtSeconds,
                     totalDurationSeconds: request.totalDurationSeconds,
                     episodeTitle: request.episodeTitle,
-                    showTitle: request.showTitle
+                    showTitle: request.showTitle,
+                    traceMode: .deferred
                 )
                 guard !Task.isCancelled else { return }
                 guard let current = self.currentVoiceSessionPrefetchRequest(),
@@ -1083,6 +1085,7 @@ final class AppState {
             ]
         )
         return ConsumedVoiceSessionPrefetch(
+            request: cached.request,
             response: cached.response,
             fetchMs: cached.fetchMs
         )
@@ -1260,6 +1263,7 @@ final class AppState {
             episodeTitle: live.episode.title,
             showTitle: live.show.title,
             preparedSession: preparedSession?.response,
+            preparedSessionRequest: preparedSession?.request,
             preparedSessionFetchMs: preparedSession?.fetchMs
         )
         Task { await session.start(context: ctx) }
