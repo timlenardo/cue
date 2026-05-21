@@ -250,12 +250,18 @@ struct SaveNoteResponse: Decodable {
 
 // MARK: - Voice realtime DTOs
 
+enum VoiceSessionTraceMode: String, Encodable {
+    case immediate
+    case deferred
+}
+
 struct VoiceSessionRequest: Encodable {
     let audioUrl: String
     let pausedAtSeconds: Double
     let totalDurationSeconds: Double?
     let episodeTitle: String
     let showTitle: String
+    let traceMode: VoiceSessionTraceMode?
 }
 
 /// Response from `POST /v1/voice/session`. `value` is the short-lived
@@ -270,6 +276,20 @@ struct VoiceSessionResponse: Decodable {
     let value: String
     let expiresAt: Int?
     let contextMessage: String?
+    let traceId: String?
+}
+
+struct VoiceSessionActivationRequest: Encodable {
+    let audioUrl: String
+    let pausedAtSeconds: Double
+    let totalDurationSeconds: Double?
+    let episodeTitle: String
+    let showTitle: String
+    let prefetchFetchMs: Int?
+    let tokenExpiresAt: Int?
+}
+
+struct VoiceSessionActivationResponse: Decodable {
     let traceId: String?
 }
 
@@ -473,14 +493,38 @@ final class CueAPI {
         pausedAtSeconds: Double,
         totalDurationSeconds: Double?,
         episodeTitle: String,
-        showTitle: String
+        showTitle: String,
+        traceMode: VoiceSessionTraceMode = .immediate
     ) async throws -> VoiceSessionResponse {
         try await post("/v1/voice/session", body: VoiceSessionRequest(
             audioUrl: audioUrl,
             pausedAtSeconds: pausedAtSeconds,
             totalDurationSeconds: totalDurationSeconds,
             episodeTitle: episodeTitle,
-            showTitle: showTitle
+            showTitle: showTitle,
+            traceMode: traceMode
+        ))
+    }
+
+    /// Starts Langfuse tracing for a prefetched voice session only after the
+    /// prefetched token is actually consumed by a realtime voice open.
+    func activatePrefetchedVoiceSession(
+        audioUrl: String,
+        pausedAtSeconds: Double,
+        totalDurationSeconds: Double?,
+        episodeTitle: String,
+        showTitle: String,
+        prefetchFetchMs: Int?,
+        tokenExpiresAt: Int?
+    ) async throws -> VoiceSessionActivationResponse {
+        try await post("/v1/voice/session/activate", body: VoiceSessionActivationRequest(
+            audioUrl: audioUrl,
+            pausedAtSeconds: pausedAtSeconds,
+            totalDurationSeconds: totalDurationSeconds,
+            episodeTitle: episodeTitle,
+            showTitle: showTitle,
+            prefetchFetchMs: prefetchFetchMs,
+            tokenExpiresAt: tokenExpiresAt
         ))
     }
 
